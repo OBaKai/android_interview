@@ -46,6 +46,65 @@
 
 #### Fragment
 
+##### 说说你对Fragment的了解。
+
+**Fragment作用**：
+
+1. Fragment 可以将 Activity 视图拆分为多个区块进行模块化地管理，避免了 Activity 视图代码过度臃肿混乱。
+2. 虽然自定义 View 也可以实现，但 Fragment 是在更高的层次封装，具有完善的生命周期管理。
+
+**Fragment源码分析**：
+https://www.jianshu.com/p/c86b6a77a43f
+https://www.jianshu.com/p/79445d860bd3
+
+FragmentController：它是 FragmentActivity 和 FragmentManager 的中间桥接者，对 Fragment 的操作最终是分发到 FragmentManager 来处理；
+
+FragmentManager：实现了 Fragment 的核心逻辑，负责对 Fragment 执行添加、移除或替换等操作，以及添加到返回堆栈。它的实现类是 FragmentManagerImpl；
+
+FragmentHostCallback：是 FragmentManager 向 Fragment 宿主的回调接口，Activity 和 Fragment 中都有内部类实现该接口，所以 Activity 和 Fragment 都可以作为另一个 Fragment 的宿主（Fragment 宿主和 FragmentManager 是 1 : 1 的关系）；
+
+FragmentTransaction：是 Fragment 事务抽象类，它的实现类 BackStackRecord 是事务管理的主要分析对象。
+事务的作用：
+可以动态改变 Fragment 状态，使得 Fragment 在一定程度脱离宿主的状态。不过，事务依然受到宿主状态约束，例如：当前 Activity 处于 STARTED 状态，那么 addFragment 不会使得 Fragment 进入 RESUME 状态。只有将来 Activity 进入 RESUME 状态时，才会同步 Fragment 到最新状态。
+
+**Fragment的生命周期实现**：
+Fragment只定义了5种生命周期状态，内部是通过状态的升级、降级来分发Fragment生命周期。
+static final int INITIALIZING = 0;     初始状态，Fragment 未创建
+static final int CREATED = 1;          已创建状态，Fragment 视图未创建
+static final int ACTIVITY_CREATED = 2; 已视图创建状态，Fragment 不可见
+static final int STARTED = 3;          可见状态，Fragment 不处于前台
+static final int RESUMED = 4;          前台状态，可接受用户交互
+
+FragmentManagerImpl#moveToState() //生命周期分发的核心方法
+f.mState < newState //状态升级
+f.mState > newState //状态降级
+
+| Activity生命周期 | FragmentManager | Fragment状态变化 | Fragment生命周期 |
+| :----:| :---: | :----: | :----:|
+|     onCreate      |            dispatchCreate             |           INITIALIZING -> CREATE            | onAttach -> onCreate |
+|  onStart（首次）  | dispatchActivityCreated dispatchStart |    CREATE -> ACTIVITY_CREATED -> STARTED    | onCreateView -> onViewCreated -> onActivityCreated -> onStart |
+| onStart（非首次） |             dispatchStart             |         ACTIVITY_CREATED -> STARTED         |                           onStart                            |
+|     onResume      |            dispatchResume             |    STARTED -> RESUMED（Fragment 可交互）    |                           onResume                           |
+|      onPause      |             dispatchPause             |             RESUMED -> STARTED              |                           onPause                            |
+|      onStop       |             dispatchStop              |         STARTED -> ACTIVITY_CREATED         |                            onStop                            |
+|     onDestroy     |            dispatchDestroy            | ACTIVITY_CREATED -> CREATED -> INITIALIZING | onDestroyView -> onDestroy -> onDetach |
+
+**事务的操作**：
+add & remove：Fragment 状态在 INITIALIZING 与 RESUMED 之间转移；
+detach & attach：Fragment 状态在 CREATE 与 RESUMED 之间转移；
+replace： 先移除所有 containerId 中的实例，再 add 一个 Fragment；
+show & hide： 只控制 Fragment 隐藏或显示，不会触发状态转移，也不会销毁 Fragment 视图或实例；
+hide & detach & remove 的区别： hide 不会销毁视图和实例、detach 只销毁视图不销毁实例、remove 会销毁实例（自然也销毁视图）。不过，如果 remove 的时候将事务添加到回退栈，那么 Fragment 实例就不会被销毁，只会销毁视图。
+
+**事务的提交**：
+commit：异步提交，不允许状态丢失	异步（handler.post）
+commitAllowingStateLoss：异步提交，允许状态丢失	异步（handler.post）
+commitNow：同步提交，不允许状态丢失	同步（事务不允许加入回退栈，因为无法确认事务的顺序）
+commitNowAllowingStateLoss：同步提交，允许状态丢失	同步	(事务不允许加入回退栈)
+executePendingTransactions：同步执行事务队列中的全部事务
+
+
+
 ##### Fragment与Activity的生命周期。+5
 
 ```java
@@ -214,11 +273,83 @@ add：添加Fragment，只是覆盖上一个Fragment。add一般会伴随hide()�
 
 
 
+##### getFragmentManager，getChildFragmentManager之间的区别？
+
+```java
+getFragmentManager：Activity 嵌套 Fragment 时选⽤
+getChildFragmentManager：Fragment 嵌套 Fragment 时选⽤
+
+getFragmentManager()所得到的是所在fragment 的父容器的管理器。
+getChildFragmentManager()所得到的是在fragment  里面子容器的管理器。
+```
+
+
+
+##### FragmentPageAdapter和FragmentStatePageAdapter区别及使用场景。
+
+```java
+FragmentStatePagerAdapter：
+FragmentStatePagerAdapter会销毁不需要的fragment，事务提交后activity的FragmentManager中的fragment会被彻底移除。
+类名中的“State”表名：在销毁fragment时，可在onSaveInstanceState(Bundle)方法中保存fragment的Bundle信息。用户切换回来时，保存的实例状态可用来恢复生产新的fragment。
+
+FragmentPageAdapter：
+对于不再需要的fragment，FragmentPageAdapter会选择调用事务的detach(Fragment)方法来处理它，而非remove(Fragment)方法，也就是说Fragment只是销毁了fragment视图，Fragment实例还保留在FragmentManager中。因此FragmentPagerAdapter创建的fragment永远不会销毁。
+
+FragmentStatePageAdapter适用于Fragment较多的情况。较多的Fragment都保存在FragmentManager中的话会对应用的性能会造成很大的影响。
+FragmentPageAdapter则适用于固定的，少量的Fragment情况。
+```
+
+
+
+##### commit与commitAllowingStateLoss的区别。
+
+```java
+commit()：需要状态保持。即只能使用在在activity的状态存储之前，即在onSaveInstanceState(Bundle outState)之前调用，否则会抛异常。
+commitAllowingStateLoss()：允许状态丢失。
+```
+
+
+
 ##### Fragment在Activity中replace的生命周期。+2
+
+```java
+消失的Fragment：onPause，onStop，onDestroyView，onDestroy，onDetach
+显示的Fragment：onAttach，onCreate，onCreateView，onViewCreated，onStart，onResume
+```
+
+
 
 ##### Fragment在Activity中replace，并addToBackStack的生命周期。
 
+```java
+消失的Fragment：onPause，onStop，onDestroyView
+显示的Fragment：onAttach，onCreate，onCreateView，onViewCreated，onStart，onResume
+
+如果按返回键会返回到上一个Fragment，其生命周期为：onCreateView，onStart，onResume
+
+使用replace加载fragment，增加addToBackStack()，原来Fragment不会销毁，但是会销毁视图和重新创建视图（回调onDestroyView和onCreateView)
+使用replace加载fragment，不增加addToBackStack，fragment会销毁（回调onDestroy)
+```
+
+
+
 ##### Fragment在ViewPager中切换的生命周期。+2
+
+```java
+在ViewPager中Fragment在切换时，会优先触发setUserVisibleHint(boolean isVisibleToUser)。可以通过该方法监听Fragment页面的显示与隐藏。
+由于ViewPager#setOffscreenPageLimit预加载的存在会同时加载多个Fragment
+这些加载的Fragment会先走setUserVisibleHint，当前显示的那个Fragment为true，其余为false。
+然后这些加载的Fragment就走生命周期：onAttach，onCreate，onCreateView，onViewCreated，onStart，onResume。
+当翻页之后，被反走的Fragment会走销毁的生命周期，不过设置不同的Adapter会走不同的销毁周期。
+  
+FragmentStatePagerAdapter：直接移除Fragment
+销毁的周期：onPause，onStop，onDestroyView，onDestroy，onDetach
+恢复的周期：onAttach，onCreate，onCreateView，onViewCreated，onStart，onResume
+  
+FragmentPageAdapter：分离Fragment，但会缓存其实例
+销毁的周期：onPause，onStop，onDestroyView
+恢复的周期：onCreateView，onViewCreated，onStart，onResume
+```
 
 
 
@@ -528,7 +659,6 @@ VSync信号负责调度从BackBuffer到FrameBuffer的复制操作。
 在双重缓存基础上增加了一个GraphicBuffer缓冲区，让这个Buffer给CPU用，让它提前忙起来。
 三缓冲有效利用了等待Vysnc的时间，减少了“掉帧”，保证画面的连续性，提高柔韧性
 
-
 安卓系统中有2种VSync信号：屏幕产生的硬件VSync和由SurfaceFlinger将其转成的软件Vsync信号。
 后者经由Binder传递给Choreographer，来执行刷新界面。
 ```
@@ -551,6 +681,50 @@ onVsync回调方法：根据返回的下一帧时间sendMessageAtTime() -> Frame
 
 总结：Choreographer支持4总类型事件：输入、绘制、动画、提交。并可通过postCallback保存起来，等待Vsync信号到来的时候刷新。
 Choreographer有监听Vsync信号，一旦收到信号就会执行doFrame方法，去执行所有类型事件。
+```
+
+
+
+##### 每隔16.6ms刷新一次屏幕到底指的是什么意思?
+
+```java
+安卓系统屏幕刷新率为60hz，就是说屏幕一秒内会刷新60次，也就是16.6ms会刷新一次屏幕。
+```
+
+
+
+##### 如果界面一直保持没变那么还会每隔16.6ms刷新一次屏幕吗?
+
+```java
+如果app界面保持不变app是不会一直刷新的。只有当app向底层注册监听下一个屏幕刷新信号之后，才能接收到下一个屏幕刷新信号的通知，只有收到通知app才回去执行绘制流程。而只有当某个View发起了刷新请求时，app才会去向底层注册监听下一一个屏幕刷新信号。
+但是系统屏幕会每隔16.6ms刷新一次，界面保持不变的话一直刷新的是相同帧。
+```
+
+
+
+##### 为什么会出现丢帧的情况？
+
+```java
+1、过度绘制 - 由于界面布局嵌套太多，导致遍历绘制View树计算屏幕数据的时间超过了16.6ms。
+2、主线程有耗时操作 - 主线程在处理耗时的操作，导致遍历绘制View树的工作迟迟不能开始从而超过了16.6ms底层切换下一帧画面的时机。
+```
+
+
+
+##### 如果避免过度绘制？
+
+```java
+1.尽量减少布局层级 - 推荐使用ConstraintLayout（约束布局）
+2.层级一样的情况下，优先考虑用LinearLayout，其性能要高于RelativeLayout
+3.重复的布局，请用 include 标签
+4.用 ViewStub 标签来加载一些不常用的布局（比如网络连接异常等等）
+5.使用 merge 标签减少布局的嵌套层次
+6.不要写多余的background
+7.去掉 window 的默认背景
+8.对于使用 Selector 当背景的 Layout（比如 ListView 的 Item，会使用 Selector 来标记点击，选择等不同的状态），可以将 normal 状态的 color 设置成”@android:color/transparent”，来解决对应的问题
+9.使用包含 layout_weight 属性的 LinearLayout 会在绘制时花费昂贵的系统资源，因为每一个子组件都需要被测量两次。在使用 ListView 与 GridView 的时候，这个问题显得尤为重要，因为子组件会重复被创建，所以要尽量避免使用 layout_weight
+10.优化自定义View的计算 - clipRect
+学会裁剪掉View的覆盖部分，增加cpu的计算量，来优化GPU的渲染，这个API可以很好的帮助那些有多组重叠组件的自定义View来控制显示的区域。同时clipRect方法还可以帮助节约GPU资源，在clipRect区域之外的绘制指令都不会被执行，那些部分内容在矩形区域内的组件，仍然会得到绘制。并且在onDraw方法中减少View的重复绘制。
 ```
 
 
