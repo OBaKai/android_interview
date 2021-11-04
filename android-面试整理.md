@@ -8,21 +8,223 @@
 
 3. Intent的作用。
 
+4. 创建dialog所需的上下文为什么必须是Activity
+
    
 
 #### Activity
 
-1. bundle的数据结构，如何存储。
-2. 说说bundle机制。+2
-3. 为什么bundle无法传大图片。
-4. Bunder传输对象为什么需要序列化？Serialzable与Parcelable的区别。
-5. 说说Activity的启动模式，分别在什么场景使用？+3
-6. Activity横竖屏切换的生命周期。+3
-7. 说说Activity的启动流程。
-9. activity.startActivity与context.startActivity的区别。
-10. 如何保存Activity的状态？
-11. onSaveInstanceState()与onRestoreIntanceState()作用是什么。
-11. 为什么finish只会10s才执行onDestory？
+##### 说说bundle机制。Bunder传输对象为什么需要序列化？+2
+
+```java
+定义：一个支持序列化（内部实现了Parcelable）的key-value容器类（内部使用ArrayMap存储数据）。
+作用：包装数据，用于组件之间的传递 或者 Activity与Fragment之间传递。
+  
+为什么Bundle需要实现序列化呢？
+序列化：将对象转换为可存储传输的字节序列。
+因为Bundle需要支持对象的传输。而对象是无法存储或传输的，需要转换成可存储传输的状态，所有才需要序列化。
+组件之间的数据传递是跨进程的，比如ActA在启动ActB时给它传递数据，是需要先给AMS进程提交申请并注册ActB的，AMS同意之后告诉app进程可以启动ActB了。这个进程间传递数据的过程，数据是需要实现序列化的。
+```
+
+
+
+##### 为什么Intent无法传大图片。
+
+```java
+1、讲清楚一个进程的Binder内存大小限制
+#define BINDER_VM_SIZE ((1 * 1024 * 1024) - sysconf(_SC_PAGE_SIZE) * 2)//这里的限制是1MB-4KB*2
+ProcessState::ProcessState(const char *driver)
+{
+    if (mDriverFD >= 0) {
+        // 调用mmap接口向Binder驱动中申请内核空间的内存
+        mVMStart = mmap(0, BINDER_VM_SIZE, PROT_READ, MAP_PRIVATE | MAP_NORESERVE, mDriverFD, 0);
+        ...
+    }
+}
+如果一个进程使用ProcessState这个类来初始化Binder服务，这个进程的Binder内核内存上限就是BINDER_VM_SIZE，也就是1MB-8KB。
+对于普通APP来说都是由Zygote进程孵化出来的，而Zygote进程的初始化Binder服务的时候提前调用了ProcessState这个类，所以普通的APP进程上限就是1MB-8KB。
+
+
+2、讲清楚Binder调用中同步、异步调用的内存限制
+并且我们在使用Binder的时候，使用同步、异步（oneway）调用也是有内存限制的。
+同步：1MB-8KB
+异步：(1MB-8KB)/2
+Binder调用中同步调用优先级大于异步的调用，为了充分满足同步调用的内存需要，所以异步调用的内存需要做限制。
+
+
+3、讲清楚startActivty(Intent)是异步调用
+Intent传输过大抛出的异常：
+android.os.TransactionTooLargeException: data parcel size 821976 bytes       
+  at android.os.BinderProxy.transactNative(Native Method)        
+  at android.os.BinderProxy.transact(BinderProxy.java:540)       
+  at android.app.IApplicationThread$Stub$Proxy.scheduleTransaction(IApplicationThread.java:2504)
+
+由于IApplicationThread是被oneway修饰，所以其内部所有方法都是异步方法。
+也就是说Intent传输的最大内存限制是(1MB-8KB)/2。
+
+
+4、讲清楚Binder内存是公用的
+一个进程内Binder内存缓存区是公用的。并且异步调用的内存限制也是累加的。
+也就是说进程中所有的异步调用总内存要是超过(1MB-8KB)/2也会抛异常。
+
+实验：传一个 ((1MB - 8KB)/2)-1 的东西
+//警告日志
+E/ActivityTaskManager: Transaction too large, intent: Intent { cmp=com.melody.test/.SecondActivity (has extras) }, extras size: 520236, icicle size: 0
+
+//崩溃信息
+Exception when starting activity com.melody.test/.SecondActivity    
+  android.os.TransactionTooLargeException: data parcel size 522968 bytes        
+    at android.os.BinderProxy.transactNative(Native Method)       
+    at android.os.BinderProxy.transact(BinderProxy.java:540)        
+    at android.app.IApplicationThread$Stub$Proxy.scheduleTransaction(IApplicationThread.java:2504)
+
+警告的打印：extras size: 520236。 崩溃的打印：data parcel size: 522968。
+大小相差：2732 约等于 2.7KB。
+说明进程内有其他的异步调用占用了2.7KB空间，如果想要不崩溃，传的大小应该是 ((1MB - 8KB)/2) -1 - 2.7KB。
+
+```
+
+
+
+##### Intent传递数据是否有大小限制？如果数据量偏大有哪些方案。
+
+```java
+有限制。传输的大小限制是(1MB-8KB)/2
+
+解决方案：
+如果对效率没有要求并且数据不敏感的话可以选：FileProvider来实现应用间共享文件。
+
+如果对效率有要求 或者 数据比较敏感：
+匿名共享内存 - MemoryFile（使用起来好麻烦）
+MemoryFile开辟内存空间，获得FileDescriptor。将FileDescriptor传给其他进程，往共享内存写入数据。
+MemoryFile需要与Binder配合使用，通过Binder将FileDescriptor传给其他线程。
+
+Linux mmap
+这个用起来就很爽了。不过需要在native层写。
+```
+
+
+
+##### 说说Activity的启动模式，分别在什么场景使用？+3
+
+```java
+Standard：标准模式。每次启动都会创建一个全新的实例。
+	场景：最常用的。
+SingleTop：栈顶复用模式。这模式下如果Activity位于栈顶不会新建实例。onNewIntent会被调用接收新的请求信息，不再调用onCreate和onStart。
+	场景：推送详情页。手机收到多条推送，点击一条查看推送详情，再点击一条查看这时会非常快得到推送详情页。
+SingleTask：栈内复用模式。如果栈内有实例则复用，并会将该实例之上的Activity全部清除。
+	场景：app首页。用户点击多次页面的相互跳转后，在点击回到主页，再次点击退出，这时他的实际需求就是要退出程序。而不是一次一次关闭刚才跳转过的页面最后才退出。
+SingleInstance：系统会为它创建一个单独的栈，并且这个实例独立运行在一个task中，这个task只有这个实例，不允许有别的Activity存在。
+	场景：电话拨号页，通过自己的应用或者其他应用打开拨打电话页面；支付页，类似支付宝、微信那种；
+```
+
+
+
+##### Activity横竖屏切换的生命周期。+3
+
+```java
+不设置android:configChanges：
+切横屏：
+onPause->onSaveInstanceState->onStop->onDestory->onCreate->onStart->onRestoreInstanceState->onResume
+切回竖屏：（3.2之前的系统会走两次生命周期，bug！！！）
+onPause->onSaveInstanceState->onStop->onDestory->onCreate->onStart->onRestoreInstanceState->onResume
+
+android:configChanges="orientation"：生命周期与上边不设置的是一样的。
+android:configChanges="orientation|keyboardHidden"：生命周期与上边不设置的是一样的。
+android:configChanges="orientation|keyboardHidden|screenSize"：不销毁Activity，只调用 onConfigurationChanged 方法。
+```
+
+
+
+##### 如何保存Activity的状态？
+
+```java
+如何保存Activity的状态？
+安卓3.0之后应用等到 onStop 返回之后才可以被杀死，也就是说在执行完 onStop 之前应用都不可能被杀死。
+所有官方建议在onPause 方法中去存储那些持久性的数据，比如用户的输入等。
+
+onSaveInstanceState 将在Activity转入“后台状态”之前被调用，能让我们存储一些activity的动态的状态值到Bundle对象中，以便在之后调用onCreate方法时用到。
+但是 onSaveInstanceState 并不是生命周期的方法，所以在activity被杀死的时候，它是不能保证百分百的被执行的。
+
+进程状态：
+可视状态：可以看得见(没有被完全遮挡)，但是没有焦点，不可以触摸操作
+前台状态：可以操作(有焦点)的状态
+后台状态：已经看不到了，系统可以将这个进程杀死来回收内存
+空进程状态：一个没有持有任何Activity和任何应用组件的进程，比如Services或者广播接受者，当内存不足的时候，它们将会被先杀死并回收。
+```
+
+
+
+##### onSaveInstanceState()与onRestoreIntanceState()作用是什么。
+
+```java
+当系统“未经你许可”时销毁了你的activity，则onSaveInstanceState会被系统调用，给你机会让你保存你的数据。
+onRestoreInstanceState是让你恢复你所保存的数据。只有在activity确实是被系统回收，重新创建情况下才会被调用。
+
+onSaveInstanceState 只适合保存瞬态数据, 比如UI控件的状态, 成员变量的值等，而不应该用来保存持久化数据。
+
+onSaveInstanceState 在 onPause 或 onStop 之前执行，onRestoreInstanceState 会在 onStart 和onResume 之间执行。
+
+onRestoreInstanceState 的bundle参数也会传递到onCreate方法中，你也可以选择在 onCreate 中做数据还原。
+```
+
+
+
+##### onCreate和onRestoreInstance方法中恢复数据时的区别。
+
+```java
+因为 onSaveInstanceState 不一定会被调用，所以 onCreate 里的Bundle参数可能为空，如果使用 onCreate 来恢复数据，一定要做非空判断。
+而 onRestoreInstanceState 的Bundle参数一定不会是空值，因为它只有在上次activity被回收了才会调用。
+
+而且 onRestoreInstanceState 是在 onStart 之后被调用的。有时我们需要 onCreate 中做的一些初始化完成之后再恢复数据，用 onRestoreInstanceState 会比较方便。
+
+用 onRestoreInstanceState 恢复数据，你可以决定是否在方法里调用父类的 onRestoreInstanceState 方法，即是否调用super.onRestoreInstanceState(savedInstanceState);
+而用 onCreate 恢复数据，你必须调用super.onCreate(savedInstanceState); 
+```
+
+
+
+##### onPause 和 onSaveInstanceState 都可以存储数据，用途有何不同
+
+```java
+onPause()方法适合去存储那些持久性的数据。
+onSaveInstanceState方法只适合保存瞬态数据, 比如UI控件的状态, 成员变量的值等。因为只有当系统“未经你许可”时销毁了你的activity，onSaveInstanceState才会被调用。
+```
+
+
+
+##### onNewIntent 什么时候执行？
+
+```java
+启动模式为singleTask，并且触发栈内复用的时候。（就会回调onNewIntent方法，而不走onCreate方法。）
+生命周期为 onNewIntent -> onRestart -> onStart -> onResume
+
+启动模式为singleTop，并且触发栈顶复用的时候。（就会回调onNewIntent方法，而不走onCreate方法。）
+生命周期为 onPause -> onNewIntent -> onStart -> onResume
+
+注意：当在onNewIntent用到intent的时候，需要在用intent之前，使用setIntent(intent)。不然getIntent()都是得到老的intent。
+```
+
+
+
+##### onRestart 什么时候执行？
+
+```java
+1. activity由不可见变为可见
+  按下home键之后，然后切换回来，会调用onRestart()；
+  从本Activity跳转到另一个Activity之后，按back键返回原来Activity，会调用onRestart()；
+  从本Activity切换到其他的应用，然后再从其他应用切换回来，会调用onRestart()。
+2. 已经存在activity实例，再次启动activity时
+  singleTask->触发栈内复用的时候，会调用onRestart()；
+```
+
+
+
+
+
+1. 说说Activity的启动流程。
+2. activity.startActivity与context.startActivity的区别。
+3. 为什么finish之后会10s才执行onDestory？
 
 
 
@@ -910,6 +1112,35 @@ Choreographer有监听Vsync信号，一旦收到信号就会执行doFrame方法�
 1. jni的注册方法有哪些。+2
 
 2. JNIEnv *env是什么？有什么用？
+
+3. extern "C"的作用
+
+   ```java
+   是让被作用的代码块采用c语言的编译规则编译
+   
+   如果没加extern "C"：
+   运行的时候就会抛异常，找不到函数
+   定义的函数：Java_com_kobe_MainActivity_stringFromJNI
+   编译之后的函数：Z40Java_com_kobe_MainActivity_stringFromJNIP7_JNIEnvP8_jobject
+   
+   C不支持函数的重载，编译之后函数名不变
+   C++支持函数的重载，编译之后函数名会变
+   静态注册的JNI接口，需要考虑C++编译之后函数名变化的问题，所以需要加上extern "C"的关键字。
+   动态注册的JNI接口，就不会有这个问题
+   
+   
+   源码是怎么使用的：头文件有可能被C语言或者C++语言使用，怎么做兼容
+   使用宏定义判断当前的编译器是不是c++编译器，这种使用技巧，可以说在android源码中随处可见
+   #if defined(__cplusplus)
+   extern "C" {
+   #endif
+   void *memset(void *s, int c, size_t n);
+   #if defined(__cplusplus)
+   }
+   #endif
+   ```
+
+   
 
    
 
