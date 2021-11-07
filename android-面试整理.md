@@ -110,11 +110,26 @@ Linux mmap
 ```java
 Standard：标准模式。每次启动都会创建一个全新的实例。
 	场景：最常用的。
+  
+  
 SingleTop：栈顶复用模式。这模式下如果Activity位于栈顶不会新建实例。onNewIntent会被调用接收新的请求信息，不再调用onCreate和onStart。
 	场景：推送详情页。手机收到多条推送，点击一条查看推送详情，再点击一条查看这时会非常快得到推送详情页。
-SingleTask：栈内复用模式。如果栈内有实例则复用，并会将该实例之上的Activity全部清除。
+  
+  
+SingleTask（FLAG_ACTIVITY_NEW_TASK）：栈内复用模式。如果栈内有实例则复用，并会将该实例之上的Activity全部清除。
+  特殊技能：可使用taskAffinity开辟新任务栈。
+  一般情况下一个应用中的所有activity具有相同的taskAffinity，也就所有activity都会在同一个任务栈中。taskAffinity是可以影响activity（singleTask）在哪个任务栈创建的。
+在activity启动的时候，AMS会检查这个activity（singleTask）是否已经有任务栈，如果没有会根据taskAffinity创建任务栈（taskAffinity默认是包名）
+	同进程设置不同的taskAffinity：activity就会在不同的任务栈中，AMS会根据不同taskAffinity创建不同的任务栈。并且在哪个任务栈启动activity，activity就会呆在哪个任务栈。
+  不同进程设置相同的taskAffinity：就会出现不同进程的activity出现在同一个任务栈中。
+  
 	场景：app首页。用户点击多次页面的相互跳转后，在点击回到主页，再次点击退出，这时他的实际需求就是要退出程序。而不是一次一次关闭刚才跳转过的页面最后才退出。
-SingleInstance：系统会为它创建一个单独的栈，并且这个实例独立运行在一个task中，这个task只有这个实例，不允许有别的Activity存在。
+  
+  
+SingleInstance：系统会为它创建一个单独的任务栈，并且这个任务栈只有这个activity，不允许有别的activity存在。
+  特殊技能：单独享用一个任务栈。
+  该模式下的activity，如果它里边启动另一个activity，这个activity会去到该进程其他的任务栈中。如果是配置了taskAffinity，那么AMS会给这个activity加上FLAG_ACTIVITY_NEW_TASK，并且为其开辟新的任务栈。
+  
 	场景：电话拨号页，通过自己的应用或者其他应用打开拨打电话页面；支付页，类似支付宝、微信那种；
 ```
 
@@ -220,11 +235,112 @@ onSaveInstanceState方法只适合保存瞬态数据, 比如UI控件的状态, �
 
 
 
+##### 为什么finish之后会10s才执行onDestory？
+
+```java
+为什么finish之后会10s才执行onDestory？
+finish()执行流程：
+(app)finish -> AMS#finishActivity -> ActivityStack#finishActivityLocked -> ActivityStack#startPausingLocked -> 
+IApplicationThread#schedulePauseActivity -> (app)ActivityThread#handlePauseActivity（回调onPause） -> AMS#activityPaused -> ActivityStack#activityPausedLocked（移除pause兜底事件）-> ActivityStack#completePauseLocked
+  
+ActivityStack#startPausingLocked逻辑：
+1、prev.app.thread.schedulePauseActivity（调用app进程的Binder接口schedulePauseActivity）
+2、增加pause流程兜底机制，发送500ms延时事件，防止第1步的pause流程不执行。
+
+ActivityThread#handlePauseActivity逻辑：
+1、调用onPause生命周期方法
+2、调用ActivityManagerNative.getDefault().activityPaused(token) 告诉AMS，我执行了onPause
+
+ActivityStack#completePauseLocked逻辑：
+1、若Activity变为不可见时，调用addToStopping函数，将中断的Activity加入到mStoppingActivities（ArrayList<ActivityRecord>）中；
+2、进入启动目标Activity的流程（ActivityStackSuperVisor#resumeFocusedStackTopActivityLocked）。
+
+也就是说，Activity执行完onPause生命周期之后，AMS并不会立即给它走onStop，而是加到一个缓存列表里边。那什么时候才会执行呢？
+
+
+  
+Activity onResume执行流程：
+ActivityThread#handleResumeActivity（回调onResume）-> Looper.myQueue().addIdleHandler(new Idler()) -> IActivityManager#activityIdle -> AMS#activityIdle -> ActivityStackSupervisor#activityIdleInternalLocked
+
+ActivityStackSupervisor#activityIdleInternalLocked逻辑：
+遍历mStoppingActivities，然后对item们进行调用
+if (r.finishing) {
+    stack.finishCurrentActivityLocked(r, ActivityStack.FINISH_IMMEDIATELY, false);
+} else {
+    stack.stopActivityLocked(r);
+}
+
+ActivityStack#finishCurrentActivityLocked -> ActivityStack#destroyActivityLocked -> 回到app走onDestory
+ActivityStack#stopActivityLocked -> 回到app走onStop -> 通知AMS -> 一顿操作之后 -> 回到app走onDestory
+
+stop/destory流程兜底机制：下一个Activity#onResume回调之后，发送一个10s的兜底事件。
+ActivityStackSupervisor#resumeFocusedStackTopActivityLocked -> ActivityStack#resumeTopActivityUncheckedLocked -> ActivityStack.resumeTopActivityInnerLocked -> ActivityRecord.completeResumeLocked -> ActivityStackSupervisor.scheduleIdleTimeoutLocked
+
+void scheduleIdleTimeoutLocked(ActivityRecord next) {
+  Message msg = mHandler.obtainMessage(IDLE_TIMEOUT_MSG, next);
+  mHandler.sendMessageDelayed(msg, IDLE_TIMEOUT); //IDLE_TIMEOUT的值是10，延时10s
+}
+
+case IDLE_TIMEOUT_MSG: {
+    activityIdleInternal((ActivityRecord) msg.obj, true);
+} 
+
+
+
+总结：
+Activity的生命stop/destory是依赖IdleHandler来回调，也就是在启动下一个Activity#onResume之后的那段空闲时间，才会执行的。
+在Activity#onResume之后也会发出一个10s的兜底事件，防止stop/destory一直不执行。
+如果在主线程的Handler消息一直很繁忙的话，是会影响stop/destory的回调。最严重的情况会出现10s才回调。
+```
+
+
+
+##### activity.startActivity与context.startActivity的区别
+
+```java
+context.startActivity如果Intent的flag没有配置 FLAG_ACTIVITY_NEW_TASK ，就会抛异常。
+context中startActivity方法真正实现是在ContextImpl.java
+    @Override
+    public void startActivity(Intent intent, Bundle options) {
+        warnIfCallingFromSystemProcess();
+        if ((intent.getFlags()&Intent.FLAG_ACTIVITY_NEW_TASK) == 0) {
+            throw new AndroidRuntimeException(
+                    "Calling startActivity() from outside of an Activity "
+                    + " context requires the FLAG_ACTIVITY_NEW_TASK flag."
+                    + " Is this really what you want?");
+        }
+        mMainThread.getInstrumentation().execStartActivity(
+                getOuterContext(), mMainThread.getApplicationThread(), null,
+                (Activity) null, intent, -1, options);
+    }
+
+activity.startActivity并没有这个限制。
+Activity继承ContextThemeWrapper，ContextThemeWrapper继承ContextWrapper，ContextWrapper继承Context
+而Activity重写了startActivity方法，解除了这个限制。
+
+  
+为什么activity.startActivity不加FLAG_ACTIVITY_NEW_TASK可以被允许的？
+因为activity里边调用startActivity，已经是能确保有任务栈了，所以可以无需加FLAG_ACTIVITY_NEW_TASK。
+而application、service、静态注册的broadcastReceiver这些地方用startActivity就必须要加，因为有可能任务栈还未建立。
+所以官方才在context.startActivity增加了这个限制。
+
+
+FLAG_ACTIVITY_NEW_TASK 也就是 启动模式中的 singleTask
+
+一般情况下一个应用中的所有activity具有相同的taskAffinity，也就所有activity都会在同一个任务栈中。taskAffinity是可以影响activity（singleTask）在哪个任务栈创建的。
+在activity启动的时候，AMS会检查这个activity（singleTask）是否已经有任务栈，如果没有会根据taskAffinity创建任务栈（taskAffinity默认是包名）
+
+同进程设置不同的taskAffinity：activity就会在不同的任务栈中，AMS会根据不同taskAffinity创建不同的任务栈。并且在哪个任务栈启动activity，activity就会呆在哪个任务栈。
+不同进程设置相同的taskAffinity：就会出现不同进程的activity出现在同一个任务栈中。
+```
+
+
+
 
 
 1. 说说Activity的启动流程。
 2. activity.startActivity与context.startActivity的区别。
-3. 为什么finish之后会10s才执行onDestory？
+3. 
 
 
 
