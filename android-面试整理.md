@@ -810,23 +810,377 @@ TransactionExecutor#performLifecycleSequence 解析：
 
 ##### 说说Activity任务栈。
 
+```java
+ActivityRecord、TaskRecord、ActivityStack 之间的关系。
+每个 ActivityStack 中包含有若干个 TaskRecord 对象；
+每个 TaskRecord 包含如果若干个 ActivityRecord 对象；
+每个 ActivityRecord 记录一个 Activity 所有信息。(一个Activity可以有多个ActivityRecord,因为Activity可以被多次启动，这主要取决于其启动模式。)
+
+  
+AMS#mStackSupervisor：
+负责管理ActivityStack，内部管理了mHomeStack、mFocusedStack和mLastFocusedStack三个ActivityStack。
+mHomeStack管理的是Launcher相关的Activity栈，stackId为0；
+mFocusedStack管理的是当前显示在前台Activity的Activity栈；
+mLastFocusedStack管理的是上一次显示在前台Activity的Activity栈。
+  
+  
+1、ActivityStack中，HomeStack是被Launcher占用，另外的均是我们启动的应用占用的。点击Home键其实就是ActivityStack们的交替。
+2、每个Activity都有一个affinity，默认会是所在应用的包名。
+3、启动一个Activity，首先有一个当前的Task，然后依据启动模式，选择是在当前Task添加，还是寻找新的Task。
+4、standard:新建实例。当前Task能添加则添加。如：当前Task中的Activity如果是singleInstance则会依据affinity寻找对应Task添加。
+	singleTop：和standard一样的步骤找到可添加的Task，然后看顶部的Activity是不是要启动的Activity。
+	singleTask：依据affinity找到可添加的Task，然后看Task中是不是有要启动的Activity实例。
+	singleInstance：依据affinity查找，是否存在只有要启动的activity的实例的Task，切换到该Task。
+```
+
+
+
 
 
 #### Service
 
-1. startService、bindService的区别？生命周期一样吗?
+##### Service和Activity怎么进行数据交互 +4
 
-2. 启动service的两种方式以及其适用场景。
+```java
+Activity->Service：
+直接在Intent里边传递数据就行了。
 
-3. Service是否在 main thread执行，service里能否执行耗时操作？为什么？
+Service->Activity：
+1、通过Binder对象
+   定义一个类继承自Binder，然后在Service#onBind中实例化这个类并且返回。
+   Activity通过bindService的方式启动service，ServiceConnection#onServiceConnected里边将IBinder强转成那个自定义的类。
 
-4. Service与Activity 是在同一个线程吗？为什么？
+2、通过LocalBroadcastReceiver
+	在Activity里边动态注册一个本地广播接受者，然后Service发送本地广播。
+
+3、EventBus
+```
+
+
+
+##### IntentService 的应用场景和内部实现原理？+2
+
+```java
+使用场景：后台执行几个耗时的任务，并且任务需要顺序执行。
+原理分析：Service + HandlerThread 的结合体
+
+IntentService#onCreate：创建了一个HandlerThread对象，并且把Looper丢给一个Handler。
+IntentService#onStartCommand：Handler发送消息（消息id：startId，消息内容：Intent（启动者传过来的Intent））。
+IntentService需要重写onHandleIntent方法，根据Intent执行具体的操作，执行完后会自动调用stopSelf(startId)。
+当执行完所有任务后，便会自动停止服务。
+
+stopSelf(startId)和stopSelf()区别：
+stopSelf()会立刻停止服务，这个时候还有可能有其他消息未处理；
+stopSelf(int startId)会等待所有的消息都处理完毕后才会终止服务。（会在执行停止服务之前判断最近启动服务的次数是否和startId相等，相等则停止，不等就等待）。
+
+顺序执行的实现原理：startService会启动服务，如果服务已经启动了，会直接走onStartCommand。借助这个机制，给内部Handler按顺序的发消息，由于Handler有消息队列，所以任务变坏顺序执行。
+耗时操作的实现原理：由于Service本身是不能做耗时操作的，所以必须使用线程。HandlerThread内部实现有线程，并且线程内部运行有自己的Looper，将这个Looper丢给一个Handler，便能在这个线程里边执行任务了。
+```
+
+
+
+##### startService、bindService的区别？生命周期一样吗? +5
+
+```java
+startService：
+生命周期：
+onCreate() -> onStartCommand() -> onDestory()
+
+特点：
+1、如果服务已经开启，不会执行 onCreate()， 而是会调用onStartCommand()；
+2、一旦服务开启跟启动者就没有任何关系了。
+
+
+bindService：
+生命周期：
+onCreate() -> onBind() -> onUnbind() -> onDestory()
+
+特点：
+1、绑定服务不会调用 onStartCommand() 方法。
+2、绑定成功后，绑定者就能够持有服务的IBinder对象，双方就能够通信了。
+```
+
+
+
+##### Service与Activity是在同一个线程吗？为什么？
+
+```java
+是的，都是在主线程。应该说是Activity、Service的所有生命周期，都是在主线程调用的。
+因为Service、Activity的启动都是通过向AMS发出申请，然后AMS那边创建好对应的Record之后，再通知对应的进程的ActivityThread，
+而ActivityThread的处理都是在主线程的Handler中发对应的消息。所有的生命周期回调都是在handeMessage里边处理的，所以都是在主线程。
+```
+
+
+
+##### 说说Service的启动流程
+
+```java
+总结：
+  
+startService
+生命周期：
+onCreate() -> onStartCommand() -> onDestory()
+
+特点：
+1、如果服务已经开启，不会执行 onCreate()， 而是会调用onStartCommand()；
+2、一旦服务开启跟启动者就没有任何关系了。
+
+启动流程：（所有生命周期都是在主线程执行的）
+1、应用进程通知AMS要启动Service；
+2、AMS构建好ServiceRecord之后，通知服务进程（有可能是跨进程启动）创建Service实例，再执行通知服务进程走onStartCommand逻辑；
+3、服务进程通过反射创建Service对象，并且调用其onCreate生命周期；
+4、服务进程通知AMS，Service启动完成。
+
+
+bindService
+生命周期：
+onCreate() -> onBind() -> onUnbind() -> onDestory()
+
+特点：
+1、绑定服务不会调用 onStartCommand() 方法。
+2、绑定成功后，绑定者就能够持有服务的IBinder对象，双方就能够通信了。
+
+启动流程：（所有生命周期都是在主线程执行的。ServiceConnection回调也是在主线程执行的）
+1、应用进程通知AMS要绑定Service，并记录绑定者的信息以及ServiceConnection对象；
+2、AMS构建好ServiceRecord之后，通知服务进程（有可能是跨进程启动）创建Service实例，再执行通知服务进程走onBind逻辑；
+3、服务进程通过反射创建Service对象，并且调用其onCreate生命周期；
+4、随后服务进程走onBind生命周期，将返回的IBinder对象回传给AMS；
+5、AMS根据绑定者的信息，找到绑定者的ServiceConnection，并将IBinder对象以及ServiceConnection对象传回绑定者进程；
+6、绑定者进程post runnable回主线程后调用ServiceConnection对象的onServiceConnected方法传入IBinder对象。
+
+  
+详细分析：
+startService：
+
+onCreate:
+ContextImpl#startService -> ContextImpl#startServiceCommon -> AMS#startService -> ActiveServices#startServiceLocked -> ActiveServices#startServiceInnerLocked -> ActiveServices#bringUpServiceLocked -> ActiveServices#realStartServiceLocked ->（app）ActivityThread#scheduleCreateService（sendMsg CREATE_SERVICE）-> ActivityThread#handleCreateService -> onCreate
+
+onStartCommand:
+ActiveServices#realStartServiceLocked -> ActiveServices#sendServiceArgsLocked -> app）ActivityThread#scheduleServiceArgs（sendMsg SERVICE_ARGS）-> ActivityThread.H#handleMessage（SERVICE_ARGS）-> ActivityThread#handleServiceArgs -> onStartCommand
+
+关键点：
+ActiveServices类：AMS里边有一个对象mServices（ActiveServices），ActiveServices类是负责Service相关的逻辑，包括启动，停止，和绑定，以及重启生命周期的调用等。
+
+ActivityThread#handleCreateService 解析：反射创建Service对象，并且调用onCreate方法
+	private void handleCreateService(CreateServiceData data) {
+	    ...
+	    LoadedApk packageInfo = getPackageInfoNoCheck(data.info.applicationInfo, data.compatInfo);
+	    Service service = null;
+	    try {
+	        java.lang.ClassLoader cl = packageInfo.getClassLoader(); //反射创建Service对象
+	        service = (Service) cl.loadClass(data.info.name).newInstance();
+	    } catch (Exception e) {}
+
+	    try {
+	        ContextImpl context = ContextImpl.createAppContext(this, packageInfo);
+	        ...
+	        //如果Application没有创建，则创建一个Application对象。
+	        Application app = packageInfo.makeApplication(false, mInstrumentation);
+
+	        service.attach(context, this, data.info.name, data.token, app, ActivityManager.getService());
+
+	        //调用Service的onCreate方法
+	        service.onCreate();
+	        ...
+	        try {
+	            ActivityManager.getService().serviceDoneExecuting(
+	                    data.token, SERVICE_DONE_EXECUTING_ANON, 0, 0);
+	        } catch (RemoteException e) {}
+	    } catch (Exception e) {}
+	}
+
+
+
+bindService：
+
+ContextImpl#bindService -> ContextImpl#bindServiceCommon -> AMS#bindService -> ActiveServices#bindServiceLocked -> ActiveServices#bringUpServiceLocked（这里开始与startService流程一直了）-> ActiveServices#realStartServiceLocked ->（app）ActivityThread#scheduleCreateService（sendMsg CREATE_SERVICE）-> ActivityThread.H#handleMessage（CREATE_SERVICE）-> ActivityThread#handleCreateService -> onCreate
+
+onBind生命周期执行流程：
+ActiveServices#realStartServiceLocked -> ActiveServices#requestServiceBindingsLocked（只有bindService才执行） -> ActiveServices#requestServiceBindingLocked -> （app）ActivityThread#scheduleBindService（sendMsg BIND_SERVICE） -> ActivityThread#handleBindService -> onBind或onRebind
+
+关键点：
+ActiveServices#realStartServiceLocked 解析：
+	private final void realStartServiceLocked(ServiceRecord r, ProcessRecord app, boolean execInFg) throws RemoteException {
+	    ...
+	    try {
+	        ...
+	        app.thread.scheduleCreateService(r, r.serviceInfo, mAm.compatibilityInfoForPackageLocked(r.serviceInfo.applicationInfo), app.repProcState);
+	    } catch (DeadObjectException e) { } finally { }
+	    ...
+	    requestServiceBindingsLocked(r, execInFg); //bindService会在该方法里边执行逻辑
+
+	    updateServiceClientActivitiesLocked(app, null, true);
+
+	    if (r.startRequested && r.callStart && r.pendingStarts.size() == 0) {
+	        r.pendingStarts.add(new ServiceRecord.StartItem(r, false, r.makeNextStartId(),
+	                null, null, 0));
+	    }
+
+	    sendServiceArgsLocked(r, execInFg, true); //如果是startService，这里会走onStartCommand
+
+	    if (r.delayed) {
+	        getServiceMapLocked(r.userId).mDelayedStartList.remove(r);
+	        r.delayed = false;
+	    }
+	   	...
+	}
+
+	private final void requestServiceBindingsLocked(ServiceRecord r, boolean execInFg)throws TransactionTooLargeException {
+		//只有bindService的时候，r.bindings才有值
+	    for (int i=r.bindings.size()-1; i>=0; i--) {
+	        IntentBindRecord ibr = r.bindings.valueAt(i);
+	        if (!requestServiceBindingLocked(r, ibr, execInFg, false)) {
+	            break;
+	        }
+	    }
+	}
+
+	private final boolean requestServiceBindingLocked(ServiceRecord r, IntentBindRecord i, boolean execInFg, boolean rebind) throws TransactionTooLargeException {
+	    ...
+	    if ((!i.requested || rebind) && i.apps.size() > 0) {
+	        try {
+	            bumpServiceExecutingLocked(r, execInFg, "bind");
+	            r.app.forceProcessStateUpTo(ActivityManager.PROCESS_STATE_SERVICE);
+	            //绑定Service对象
+	            r.app.thread.scheduleBindService(r, i.intent.getIntent(), rebind, r.app.repProcState);
+	            if (!rebind) {
+	                i.requested = true;
+	            }
+	            i.hasBound = true;
+	            i.doRebind = false;
+	        } catch (TransactionTooLargeException e) {} catch (RemoteException e) {}
+	    }
+	    return true;
+	}
+
+
+ActivityThread#handleBindService 解析：
+	private void handleBindService(BindServiceData data) {
+	    //获取Service对象
+	    Service s = mServices.get(data.token); 
+	    if (s != null) {
+	        try {
+	           	...
+	            try {
+	                if (!data.rebind) { //判断是否为重新绑定
+	                    //走onBind生命周期，并且获取返回值IBinder对象
+	                    IBinder binder = s.onBind(data.intent);
+	                    //将IBinder对象，传给AMS
+	                    ActivityManager.getService().publishService(data.token, data.intent, binder);
+	                } else { //重新绑定走onRebind生命周期
+	                    s.onRebind(data.intent);
+	                    ActivityManager.getService().serviceDoneExecuting(data.token, SERVICE_DONE_EXECUTING_ANON, 0, 0);
+	                }
+	                ...
+	            } catch (RemoteException ex) {}
+	        } catch (Exception e) {}
+	    }
+	}
+
+给启动者执行ServiceConnection回调：
+在onBind生命周期回调之后，会调用AMS#publishService。
+AMS#publishService -> ActiveServices#publishServiceLocked -> （app）ConnectionRecord.InnerConnection（继承自IServiceConnection）#connected -> LoadedApk.ServiceDispatcher#connected（post runnable） -> LoadedApk.ServiceDispatcher#doConnected -> ServiceConnection#onServiceConnected
+
+void publishServiceLocked(ServiceRecord r, Intent intent, IBinder service) {
+    final long origId = Binder.clearCallingIdentity();
+    try {
+        if (r != null) {
+            Intent.FilterComparison filter
+                    = new Intent.FilterComparison(intent);
+            IntentBindRecord b = r.bindings.get(filter);
+            if (b != null && !b.received) {
+                b.binder = service;
+                b.requested = true;
+                b.received = true;
+                //ServiceRecord的connections是一个ArrayMap对象。
+                //遍历该ArrayMap对象的Value值，Value值是一个ArrayList对象
+                //遍历ArrayList对象，获取每一个ConnectionRecord对象，通过filter找到
+                //相应的ConnectionRecord对象
+                for (int conni=r.connections.size()-1; conni>=0; conni--) {
+                    ArrayList<ConnectionRecord> clist = r.connections.valueAt(conni);
+                    for (int i=0; i<clist.size(); i++) {
+                        ConnectionRecord c = clist.get(i);
+                        if (!filter.equals(c.binding.intent.intent)) {
+                            continue;
+                        }
+                        try {
+                            //c是ConnectionRecord对象，其中的conn是InnerConnection
+                            //对象，这里实际上是调用了InnerConnection的connected方法。
+                            c.conn.connected(r.name, service, false);
+                        } catch (Exception e) {
+                        }
+                    }
+                }
+            }
+
+            serviceDoneExecutingLocked(r, mDestroyingServices.contains(r), false);
+        }
+    } finally {
+        Binder.restoreCallingIdentity(origId);
+    }
+}
+
+public void doConnected(ComponentName name, IBinder service, boolean dead) {
+    ServiceDispatcher.ConnectionInfo old;
+    ServiceDispatcher.ConnectionInfo info;
+
+    synchronized (this) {
+        old = mActiveConnections.get(name);
+        //Service已经绑定过了
+        if (old != null && old.binder == service) {
+            return;
+        }
+        //将新的Service信息存储起来
+        if (service != null) {
+            info = new ConnectionInfo();
+            info.binder = service;
+            info.deathMonitor = new DeathMonitor(name, service);
+            try {
+                service.linkToDeath(info.deathMonitor, 0);
+                mActiveConnections.put(name, info);
+            } catch (RemoteException e) {
+                mActiveConnections.remove(name);
+                return;
+            }
+        } else {
+            mActiveConnections.remove(name);
+        }
+        if (old != null) {
+            old.binder.unlinkToDeath(old.deathMonitor, 0);
+        }
+    }
+
+    ///将旧的Service进行解绑的操作
+    if (old != null) {
+        mConnection.onServiceDisconnected(name);
+    }
+    if (dead) {
+        mConnection.onBindingDied(name);
+    }
+    //调用mConnection对象的onServiceConnected方法绑定新的Service
+    //这里的mConnection就是ServiceConnection对象，也即是我们最开始调用bindService方法时
+    //传进来的参数。这里的service参数就是Service服务的onBind方法返回的IBinder对象。
+    if (service != null) {
+        mConnection.onServiceConnected(name, service);
+    }
+}
+```
+
+
+
+1. startService、bindService的区别？生命周期一样吗? +3
+
+4. Service与Activity 是在同一个线程吗？为什么？+2
 
    
 
 #### BroadcastReceiver
 
 1. 说说Broadcast的注册方式与区别。+3
+
+2. 有序广播与无序广播的区别。
+
+3. BroadcastReceiver 与 LocalBroadcastReceiver 有什么区别？
 
    
 
