@@ -1,0 +1,215 @@
+详细分析：
+startService：
+
+onCreate:
+ContextImpl#startService -> ContextImpl#startServiceCommon -> AMS#startService -> ActiveServices#startServiceLocked -> ActiveServices#startServiceInnerLocked -> ActiveServices#bringUpServiceLocked -> ActiveServices#realStartServiceLocked ->（app）ActivityThread#scheduleCreateService（sendMsg CREATE_SERVICE）-> ActivityThread#handleCreateService -> onCreate
+
+onStartCommand:
+ActiveServices#realStartServiceLocked -> ActiveServices#sendServiceArgsLocked -> app）ActivityThread#scheduleServiceArgs（sendMsg SERVICE_ARGS）-> ActivityThread.H#handleMessage（SERVICE_ARGS）-> ActivityThread#handleServiceArgs -> onStartCommand
+
+关键点：
+ActiveServices类：AMS里边有一个对象mServices（ActiveServices），ActiveServices类是负责Service相关的逻辑，包括启动，停止，和绑定，以及重启生命周期的调用等。
+
+ActivityThread#handleCreateService 解析：反射创建Service对象，并且调用onCreate方法
+	private void handleCreateService(CreateServiceData data) {
+	    ...
+	    LoadedApk packageInfo = getPackageInfoNoCheck(data.info.applicationInfo, data.compatInfo);
+	    Service service = null;
+	    try {
+	        java.lang.ClassLoader cl = packageInfo.getClassLoader(); //反射创建Service对象
+	        service = (Service) cl.loadClass(data.info.name).newInstance();
+	    } catch (Exception e) {}
+
+	    try {
+	        ContextImpl context = ContextImpl.createAppContext(this, packageInfo);
+	        ...
+	        //如果Application没有创建，则创建一个Application对象。
+	        Application app = packageInfo.makeApplication(false, mInstrumentation);
+
+	        service.attach(context, this, data.info.name, data.token, app, ActivityManager.getService());
+
+	        //调用Service的onCreate方法
+	        service.onCreate();
+	        ...
+	        try {
+	            ActivityManager.getService().serviceDoneExecuting(
+	                    data.token, SERVICE_DONE_EXECUTING_ANON, 0, 0);
+	        } catch (RemoteException e) {}
+	    } catch (Exception e) {}
+	}
+
+
+
+bindService：
+
+ContextImpl#bindService -> ContextImpl#bindServiceCommon -> AMS#bindService -> ActiveServices#bindServiceLocked -> ActiveServices#bringUpServiceLocked（这里开始与startService流程一直了）-> ActiveServices#realStartServiceLocked ->（app）ActivityThread#scheduleCreateService（sendMsg CREATE_SERVICE）-> ActivityThread.H#handleMessage（CREATE_SERVICE）-> ActivityThread#handleCreateService -> onCreate
+
+onBind生命周期执行流程：
+ActiveServices#realStartServiceLocked -> ActiveServices#requestServiceBindingsLocked（只有bindService才执行） -> ActiveServices#requestServiceBindingLocked -> （app）ActivityThread#scheduleBindService（sendMsg BIND_SERVICE） -> ActivityThread#handleBindService -> onBind或onRebind
+
+关键点：
+ActiveServices#realStartServiceLocked 解析：
+	private final void realStartServiceLocked(ServiceRecord r, ProcessRecord app, boolean execInFg) throws RemoteException {
+	    ...
+	    try {
+	        ...
+	        app.thread.scheduleCreateService(r, r.serviceInfo, mAm.compatibilityInfoForPackageLocked(r.serviceInfo.applicationInfo), app.repProcState);
+	    } catch (DeadObjectException e) { } finally { }
+	    ...
+	    requestServiceBindingsLocked(r, execInFg); //bindService会在该方法里边执行逻辑
+
+	    updateServiceClientActivitiesLocked(app, null, true);
+
+	    if (r.startRequested && r.callStart && r.pendingStarts.size() == 0) {
+	        r.pendingStarts.add(new ServiceRecord.StartItem(r, false, r.makeNextStartId(),
+	                null, null, 0));
+	    }
+
+	    sendServiceArgsLocked(r, execInFg, true); //如果是startService，这里会走onStartCommand
+
+	    if (r.delayed) {
+	        getServiceMapLocked(r.userId).mDelayedStartList.remove(r);
+	        r.delayed = false;
+	    }
+	   	...
+	}
+
+	private final void requestServiceBindingsLocked(ServiceRecord r, boolean execInFg)throws TransactionTooLargeException {
+		//只有bindService的时候，r.bindings才有值
+	    for (int i=r.bindings.size()-1; i>=0; i--) {
+	        IntentBindRecord ibr = r.bindings.valueAt(i);
+	        if (!requestServiceBindingLocked(r, ibr, execInFg, false)) {
+	            break;
+	        }
+	    }
+	}
+
+	private final boolean requestServiceBindingLocked(ServiceRecord r, IntentBindRecord i, boolean execInFg, boolean rebind) throws TransactionTooLargeException {
+	    ...
+	    if ((!i.requested || rebind) && i.apps.size() > 0) {
+	        try {
+	            bumpServiceExecutingLocked(r, execInFg, "bind");
+	            r.app.forceProcessStateUpTo(ActivityManager.PROCESS_STATE_SERVICE);
+	            //绑定Service对象
+	            r.app.thread.scheduleBindService(r, i.intent.getIntent(), rebind, r.app.repProcState);
+	            if (!rebind) {
+	                i.requested = true;
+	            }
+	            i.hasBound = true;
+	            i.doRebind = false;
+	        } catch (TransactionTooLargeException e) {} catch (RemoteException e) {}
+	    }
+	    return true;
+	}
+
+
+ActivityThread#handleBindService 解析：
+	private void handleBindService(BindServiceData data) {
+	    //获取Service对象
+	    Service s = mServices.get(data.token); 
+	    if (s != null) {
+	        try {
+	           	...
+	            try {
+	                if (!data.rebind) { //判断是否为重新绑定
+	                    //走onBind生命周期，并且获取返回值IBinder对象
+	                    IBinder binder = s.onBind(data.intent);
+	                    //将IBinder对象，传给AMS
+	                    ActivityManager.getService().publishService(data.token, data.intent, binder);
+	                } else { //重新绑定走onRebind生命周期
+	                    s.onRebind(data.intent);
+	                    ActivityManager.getService().serviceDoneExecuting(data.token, SERVICE_DONE_EXECUTING_ANON, 0, 0);
+	                }
+	                ...
+	            } catch (RemoteException ex) {}
+	        } catch (Exception e) {}
+	    }
+	}
+
+给启动者执行ServiceConnection回调：
+在onBind生命周期回调之后，会调用AMS#publishService。
+AMS#publishService -> ActiveServices#publishServiceLocked -> （app）ConnectionRecord.InnerConnection（继承自IServiceConnection）#connected -> LoadedApk.ServiceDispatcher#connected（post runnable） -> LoadedApk.ServiceDispatcher#doConnected -> ServiceConnection#onServiceConnected
+
+void publishServiceLocked(ServiceRecord r, Intent intent, IBinder service) {
+    final long origId = Binder.clearCallingIdentity();
+    try {
+        if (r != null) {
+            Intent.FilterComparison filter
+                    = new Intent.FilterComparison(intent);
+            IntentBindRecord b = r.bindings.get(filter);
+            if (b != null && !b.received) {
+                b.binder = service;
+                b.requested = true;
+                b.received = true;
+                //ServiceRecord的connections是一个ArrayMap对象。
+                //遍历该ArrayMap对象的Value值，Value值是一个ArrayList对象
+                //遍历ArrayList对象，获取每一个ConnectionRecord对象，通过filter找到
+                //相应的ConnectionRecord对象
+                for (int conni=r.connections.size()-1; conni>=0; conni--) {
+                    ArrayList<ConnectionRecord> clist = r.connections.valueAt(conni);
+                    for (int i=0; i<clist.size(); i++) {
+                        ConnectionRecord c = clist.get(i);
+                        if (!filter.equals(c.binding.intent.intent)) {
+                            continue;
+                        }
+                        try {
+                            //c是ConnectionRecord对象，其中的conn是InnerConnection
+                            //对象，这里实际上是调用了InnerConnection的connected方法。
+                            c.conn.connected(r.name, service, false);
+                        } catch (Exception e) {
+                        }
+                    }
+                }
+            }
+
+            serviceDoneExecutingLocked(r, mDestroyingServices.contains(r), false);
+        }
+    } finally {
+        Binder.restoreCallingIdentity(origId);
+    }
+}
+
+public void doConnected(ComponentName name, IBinder service, boolean dead) {
+    ServiceDispatcher.ConnectionInfo old;
+    ServiceDispatcher.ConnectionInfo info;
+
+    synchronized (this) {
+        old = mActiveConnections.get(name);
+        //Service已经绑定过了
+        if (old != null && old.binder == service) {
+            return;
+        }
+        //将新的Service信息存储起来
+        if (service != null) {
+            info = new ConnectionInfo();
+            info.binder = service;
+            info.deathMonitor = new DeathMonitor(name, service);
+            try {
+                service.linkToDeath(info.deathMonitor, 0);
+                mActiveConnections.put(name, info);
+            } catch (RemoteException e) {
+                mActiveConnections.remove(name);
+                return;
+            }
+        } else {
+            mActiveConnections.remove(name);
+        }
+        if (old != null) {
+            old.binder.unlinkToDeath(old.deathMonitor, 0);
+        }
+    }
+
+    ///将旧的Service进行解绑的操作
+    if (old != null) {
+        mConnection.onServiceDisconnected(name);
+    }
+    if (dead) {
+        mConnection.onBindingDied(name);
+    }
+    //调用mConnection对象的onServiceConnected方法绑定新的Service
+    //这里的mConnection就是ServiceConnection对象，也即是我们最开始调用bindService方法时
+    //传进来的参数。这里的service参数就是Service服务的onBind方法返回的IBinder对象。
+    if (service != null) {
+        mConnection.onServiceConnected(name, service);
+    }
+}

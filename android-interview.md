@@ -1,18 +1,6 @@
-## Android
+## 四大组件
 
-#### Context
-
-1. 说说你对Context的了解。
-
-2. Activity、Context、Application三者有什么不同。+2
-
-3. Intent的作用。
-
-4. 创建dialog所需的上下文为什么必须是Activity
-
-   
-
-#### Activity
+### Activity  ✅
 
 ##### 说说bundle机制。Bunder传输对象为什么需要序列化？+2
 
@@ -264,7 +252,13 @@ onSaveInstanceState方法只适合保存瞬态数据, 比如UI控件的状态, �
 ##### 为什么finish之后会10s才执行onDestory？
 
 ```java
-为什么finish之后会10s才执行onDestory？
+总结：
+1、Activity的生命stop/destory是依赖IdleHandler来回调，也就是在启动下一个Activity#onResume之后的那段空闲时间，才会执行的。
+2、在Activity#onResume之后也会发出一个10s的兜底事件，防止stop/destory一直不执行。
+3、如果在主线程的Handler消息一直很繁忙的话，是会影响stop/destory的回调。最严重的情况会出现10s才回调。
+
+  
+详细分析：
 finish()执行流程：
 (app)finish -> AMS#finishActivity -> ActivityStack#finishActivityLocked -> ActivityStack#startPausingLocked -> 
 IApplicationThread#schedulePauseActivity -> (app)ActivityThread#handlePauseActivity（回调onPause） -> AMS#activityPaused -> ActivityStack#activityPausedLocked（移除pause兜底事件）-> ActivityStack#completePauseLocked
@@ -282,7 +276,6 @@ ActivityStack#completePauseLocked逻辑：
 2、进入启动目标Activity的流程（ActivityStackSuperVisor#resumeFocusedStackTopActivityLocked）。
 
 也就是说，Activity执行完onPause生命周期之后，AMS并不会立即给它走onStop，而是加到一个缓存列表里边。那什么时候才会执行呢？
-
 
   
 Activity onResume执行流程：
@@ -310,13 +303,6 @@ void scheduleIdleTimeoutLocked(ActivityRecord next) {
 case IDLE_TIMEOUT_MSG: {
     activityIdleInternal((ActivityRecord) msg.obj, true);
 } 
-
-
-
-总结：
-Activity的生命stop/destory是依赖IdleHandler来回调，也就是在启动下一个Activity#onResume之后的那段空闲时间，才会执行的。
-在Activity#onResume之后也会发出一个10s的兜底事件，防止stop/destory一直不执行。
-如果在主线程的Handler消息一直很繁忙的话，是会影响stop/destory的回调。最严重的情况会出现10s才回调。
 ```
 
 
@@ -445,365 +431,6 @@ AMS通过调用 IApplicationThread#bindApplication 通知应用进程创建Appli
 
 6、最后走Activity的onStart、onResume生命周期，完成启动流程。
 根据启动Activity事务里的LifecycleItem，执行分别执行生命周期轨迹onStart、onResume。
-
-
-  
-详细分析：
-1、Launcher向AMS请求启动Activity
-Launcher#startActivitySafely -> Activity#startActivity -> Instrumentation#execStartActivity（调用ActivityManager.getService().startActivity）-> 跑到AMS...
-
-关键点：
-Launcher#startActivitySafely 解析：
-    给要启动的Intent加上 Intent.FLAG_ACTIVITY_NEW_TASK（singleTask）（要启动程序的根Activity，需要创建任务栈）;
-
-关键点：
-ActivityManager.getService 解析：获取AMS的代理对象；
-    //得到activity的service引用，即IBinder类型的AMS引用
-    final IBinder b = ServiceManager.getService(Context.ACTIVITY_SERVICE); 
-    //转换成IActivityManager对象
-    final IActivityManager am = IActivityManager.Stub.asInterface(b);
-
-ActivityManager.getService().startActivity 解析：
-    通过Binder接口，调用AMS方法
-
-
-
-2、AMS发送创建应用进程请求
-第一步：AMS调用Process来进行进程启动
-AMS#startActivity -> AMS#startActivityAsUser -> ActivityStarter#execute -> ActivityStarter#startActivityMayWait（根据Intent寻找合适的activity，如果存在多个符合条件会弹ResolverActivity让用户选择）-> ActivityStarter#startActivityUnchecked（根据启动模式做对应操作，由于是singleTask这里会创建一个任务栈） -> ActivityStackSupervisor#resumeFocusedStackTopActivityLocked -> ActivityStack#resumeTopActivityUncheckedLocked -> ActivityStackSupervisor#startSpecificActivityLocked（关键方法，普通Activity和根Activity启动流程的分岔路口）-> AMS#startProcessLocked -> AMS#startProcess（启动进程）
-
-关键点：
-ActivityStackSupervisor#startSpecificActivityLocked 解析：
-        //获取将要启动的Activity的所在的进程
-        ProcessRecord app = mService.getProcessRecordLocked(r.processName, r.info.applicationInfo.uid, true);
-        if (app != null && app.thread != null) { //如果进程已存在
-            try {
-                if ((r.info.flags&ActivityInfo.FLAG_MULTIPROCESS) == 0 || !"android".equals(r.info.packageName)) {
-                    app.addPackage(r.info.packageName, r.info.applicationInfo.longVersionCode, mService.mProcessStats);
-                }
-                realStartActivityLocked(r, app, andResume, checkConfig);
-                return;
-            } catch (RemoteException e) {}
-        }
-        //应用进程还未创建，则通过AMS调用startProcessLocked启动进程
-        mService.startProcessLocked(r.processName, r.info.applicationInfo, true, 0, "activity", r.intent.getComponent(), false, false, true);
-
-热启动：要启动的进程以及存在，走 realStartActivityLocked 然后直接返回了。
-冷启动：进程并未启动，那么就先走启动进程流程。
-
-AMS#startProcess 解析：
-    //调用Process.start方法来为应用创建进程
-    //final String entryPoint = "android.app.ActivityThread"; 创建进程后，主线程入口
-    startResult = Process.start(entryPoint,
-        app.processName, uid, uid, gids, runtimeFlags, mountExternal,
-        app.info.targetSdkVersion, seInfo, requiredAbi, instructionSet,
-        app.info.dataDir, invokeWith,
-        new String[] {PROC_START_SEQ_IDENT + app.startSeq});
-
-
-第二步：Process向Zygote进程发送创建应用进程请求
-Process#start -> Process.ProcessStartResult#start -> Process.ProcessStartResult#startViaZygote
-
-关键点：
-Process.ProcessStartResult#startViaZygote 解析：
-    // --runtime-args, --setuid=, --setgid=,
-    //创建字符串列表，并将启动应用进程的启动参数保存到列表中
-    argsForZygote.add("--runtime-args");
-    argsForZygote.add("--setuid=" + uid);
-    argsForZygote.add("--setgid=" + gid);
-    argsForZygote.add("--runtime-flags=" + runtimeFlags);
-    ...
-
-    //openZygoteSocketIfNeeded：与Zygote建立Socket连接（这里连接的address是根据abi来传的），ZygoteState类型的对象。
-    //zygoteSendArgsAndGetResult：由于已经与Zygote建立了Socket连接，这方法就是将进程的启动参数通过写入ZygoteState传给Zygote。
-    return zygoteSendArgsAndGetResult(openZygoteSocketIfNeeded(abi), useBlastulaPool, argsForZygote);
-
-
-
-3、Zygote进程孵化应用进程
-第一步、fork出应用进程
-ZygoteInit#main（创建Server端，并且等待Client连接）-> ZygoteServer#runSelectLoop（死循环不停的监听着Socket连接）-> ZygoteConnection#processOneCommand（fork进程）
-
-关键点：
-ZygoteInit#main 解析：
-    public static void main(String argv[]) {
-        ZygoteServer zygoteServer = new ZygoteServer();
-        Runnable caller;
-        try {
-            ...
-            //创建名为zygote的Socket
-            zygoteServer.createZygoteSocket(socketName);
-            ....
-            //由于在init.rc中设置了start-system-server参数,因此
-            //这里将启动SystemServer,可见SystemServer由Zygote创建的第一个进程
-            if (startSystemServer) {
-                Runnable r = forkSystemServer(abiList, socketName, zygoteServer);
-                if (r != null) {
-                    r.run();
-                    return;
-                }
-            }
-           
-            caller = Zygote.initBlastulaPool();
-            if (caller == null) {
-                //等待AMS的请求
-                caller = zygoteServer.runSelectLoop(abiList);
-            }
-        } catch (Throwable ex) {
-        } finally {
-            zygoteServer.closeServerSocket();
-        }
-
-        //执行AMS请求返回的Runnable
-        if (caller != null) {
-            caller.run();
-        }
-    }
-
-
-
-第二步、在应用进程反射ActivityThread，并调用其main方法
-ZygoteConnection#handleChildProc -> ZygoteInit#zygoteInit -> RuntimeInit#applicationInit -> RuntimeInit#findStaticMain（反射ActivityThread拿到main方法。传给一个Runnable就返回了）
-
-关键点：
-
-ZygoteConnection#processOneCommand 解析：
-    获取应用程序进程的启动参数；
-    fork当前进程创建一个子进程。
-        在子进程执行 handleChildProc（pid=0）
-        在父进程执行 handleParentProc（pid不为0）
-
-RuntimeInit#findStaticMain 解析：
-    根据AMS传传过来的“android.app.ActivityThread”反射拿到其main方法；
-    然后创建一个Runnable，在其run方法里边执行反射 ActivityThread#main；
-    这个Runnable通过层层返回最终回到了 ZygoteInit#main，在ZygoteInit#main里边调用了run方法。
-
-
-
-4、应用进程绑定AMS（IActivityManager：应用进程持有的AMS binder接口；IApplicationThread：AMS持有的应用进程binder接口）
-第一步、AMS初始化应用进程的Application
-（app）ActivityThread#main -> ActivityThread#attach -> AMS#attachApplication -> AMS#attachApplicationLocked 
--> (app)ApplicationThread#bindApplication（sendMsg BIND_APPLICATION） -> ActivityThread#handleBindApplication -> Instrumentation#callApplicationOnCreate -> Application#onCreate
-
-关键点：
-
-ActivityThread#main 解析：
-    public static void main(String[] args) {
-        //创建主线程的消息队列
-        Looper.prepareMainLooper();
-
-        ActivityThread thread = new ActivityThread();
-        thread.attach(false, startSeq);
-
-        //开启主线程的消息循环（保证主线程一直存活的关键）
-        Looper.loop();
-    }
-
-ActivityThread#attach 解析：
-    final ApplicationThread mAppThread = new ApplicationThread(); //实现了IApplicationThread接口
-    private void attach(boolean system, long startSeq) {
-        if (!system) {
-            ...
-            final IActivityManager mgr = ActivityManager.getService();
-            try {
-                mgr.attachApplication(mAppThread, startSeq); //AMS绑定ApplicationThread对象
-            } catch (RemoteException ex) { }
-
-            //垃圾回收观察者
-            BinderInternal.addGcWatcher(new Runnable() {
-                @Override public void run() {
-                    ...
-                    Runtime runtime = Runtime.getRuntime();
-                    long dalvikMax = runtime.maxMemory();
-                    long dalvikUsed = runtime.totalMemory() - runtime.freeMemory();
-                    //每当系统触发GC，自己就计算下使用了多少内存，如果超过总量的3/4就，就告诉AMS叫它帮忙释放下。
-                    if (dalvikUsed > ((3*dalvikMax)/4)) {
-                        try {
-                            mgr.releaseSomeActivities(mAppThread);
-                        } catch (RemoteException e) { }
-                    }
-                }
-            });
-        } 
-        ...
-    }
-
-AMS#attachApplicationLocked 解析：
-    private final boolean attachApplicationLocked(IApplicationThread thread, int pid, int callingUid, long startSeq) {
-        //AMS调用客户端的binder对象IApplicationThread
-        //Application#onCreate就是在这里走的
-        thread.bindApplication(...一大波传参);
-        ...
-        if (normalMode) {
-            try {
-                if (mStackSupervisor.attachApplicationLocked(app)) { //启动Activity
-                    didSomething = true;
-                }
-            } catch (Exception e) {}
-        }
-        ...
-    }
-
-第二步、AMS创建ClientTransaction传递给应用进程
-AMS#attachApplicationLocked（除了初始化Application，另一个重要逻辑就是启动根Activity）-> ActivityStackSupervisor#attachApplicationLocked -> ActivityStackSupervisor#realStartActivityLocked -> ClientLifecycleManager#scheduleTransaction（LaunchActivityItem）-> （app）ApplicationThread#scheduleTransaction -> ActivityThread#scheduleTransaction（ActivityThread继承自ClientTransactionHandler）-> ClientTransactionHandler#scheduleTransaction（sendMsg EXECUTE_TRANSACTION）-> ActivityThread.H#handleMessage（EXECUTE_TRANSACTION）-> TransactionExecutor#execute
-
-关键点：
-
-ActivityStackSupervisor#realStartActivityLocked 解析：封装ClientTransaction，给应用进程执行
-    final boolean realStartActivityLocked(ActivityRecord r, ProcessRecord app,
-            boolean andResume, boolean checkConfig) throws RemoteException {
-                ...
-                final ClientTransaction clientTransaction = ClientTransaction.obtain(app.thread, r.appToken);
-                //添加callback
-                clientTransaction.addCallback(LaunchActivityItem.obtain(...一大波传参));
-
-                //判断此时的生命周期是resume还是pause
-                final ActivityLifecycleItem lifecycleItem;
-                if (andResume) {
-                    lifecycleItem = ResumeActivityItem.obtain(mService.isNextTransitionForward());
-                } else {
-                    lifecycleItem = PauseActivityItem.obtain();
-                }
-                //设置当前的生命周期
-                clientTransaction.setLifecycleStateRequest(lifecycleItem);
-
-                mService.getLifecycleManager().scheduleTransaction(clientTransaction);
-                ...
-            } 
-            ...
-        return true;
-    }
-
-ClientLifecycleManager.scheduleTransaction 解析：将ClientTransaction传给应用进程
-    void scheduleTransaction(ClientTransaction transaction) throws RemoteException {
-        final IApplicationThread client = transaction.getClient();
-        transaction.schedule();
-        if (!(client instanceof Binder)) {
-            transaction.recycle();
-        }
-    }
-
-    //ClientTransaction#schedule
-    public void schedule() throws RemoteException {
-        //mClient就说IApplicationThread接口
-        mClient.scheduleTransaction(this);
-    }
-
-TransactionExecutor#execute 解析：执行callback以及更新生命周期状态
-    public void execute(ClientTransaction transaction) {
-        executeCallbacks(transaction);
-        executeLifecycleState(transaction);
-    }
-
-    public void executeCallbacks(ClientTransaction transaction) {
-        final List<ClientTransactionItem> callbacks = transaction.getCallbacks();
-        if (callbacks == null) {
-            return;
-        }
-        ...
-        final int size = callbacks.size(); //执行callback
-        for (int i = 0; i < size; ++i) {
-            final ClientTransactionItem item = callbacks.get(i);
-            ...
-            //这个item为LaunchActivityItem
-            //由于LaunchActivityItem没有实现postExecute，所以只需要分析execute
-            item.execute(mTransactionHandler, token, mPendingActions);
-            item.postExecute(mTransactionHandler, token, mPendingActions);
-            ...
-        }
-    }
-
-
-
-第三步、应用进程创建实例Activity，走onCreate生命周期。
-
-执行LaunchActivityItem：
-TransactionExecutor#executeCallbacks -> LaunchActivityItem#execute -> ClientTransactionHandler#handleLaunchActivity -> ClientTransactionHandler#performLaunchActivity -> ... -> onCreate()
-
-关键点：
-
-ClientTransactionHandler#performLaunchActivity 解析：
-    private Activity performLaunchActivity(ActivityClientRecord r, Intent customIntent) {
-        ...
-        ContextImpl appContext = createBaseContextForActivity(r); //创建要启动Activity的上下文环境
-        Activity activity = null;
-        try {
-            java.lang.ClassLoader cl = appContext.getClassLoader();
-            //用类加载器来创建该Activity的实例
-            activity = mInstrumentation.newActivity(
-                    cl, component.getClassName(), r.intent);
-            ...
-        }
-        ...
-        try {
-            //创建Application,makeApplication会调用Application的onCreate方法
-            Application app = r.packageInfo.makeApplication(false, mInstrumentation);
-            ...
-            if (activity != null) {
-                ...
-                //初始化Activity
-                activity.attach(appContext, this, getInstrumentation(), r.token,
-                        r.ident, app, r.intent, r.activityInfo, title, r.parent,
-                        r.embeddedID, r.lastNonConfigurationInstances, config,
-                        r.referrer, r.voiceInteractor, window, r.configCallback);
-                ...
-                //回调onCreate生命周期
-                if (r.isPersistable()) { 
-                    mInstrumentation.callActivityOnCreate(activity, r.state, r.persistentState);
-                } else {
-                    mInstrumentation.callActivityOnCreate(activity, r.state);
-                }
-                ....
-            }
-            //设置生命周期状态为onCreate
-            r.setState(ON_CREATE);
-        } 
-        ...
-        return activity;
-    }
-
-
-第四步、走onStart、onResume生命周期
-TransactionExecutor#executeLifecycleState -> TransactionExecutor#cycleToPath -> TransactionExecutor#performLifecycleSequence -> ActivityThread#handleStartActivity -> ... -> onStart()
-
-TransactionExecutor#executeLifecycleState -> ActivityLifecycleItem#execute -> ActivityThread#handleResumeActivity -> ... -> onResume()
-
-关键点：
-TransactionExecutor#executeLifecycleState 解析：
-    private void executeLifecycleState(ClientTransaction transaction) {
-        final ActivityLifecycleItem lifecycleItem = transaction.getLifecycleStateRequest();
-        if (lifecycleItem == null) { return; }
-        ...
-        //cycleToPath方法作用：根据生命周期轨迹，走接下来的生命周期
-        //由于这个ActivityLifecycleItem是ResumeActivityItem，所以getTargetState为ON_RESUME
-        cycleToPath(r, lifecycleItem.getTargetState(), true /* excludeLastState */);
-
-        lifecycleItem.execute(mTransactionHandler, token, mPendingActions);
-        lifecycleItem.postExecute(mTransactionHandler, token, mPendingActions);
-    }
-
-    private void cycleToPath(ActivityClientRecord r, int finish, boolean excludeLastState) {
-        final int start = r.getLifecycleState();
-        //根据起终点，获取生命周期轨迹的路线。添加onCreate - onResume之间的生命周期
-        final IntArray path = mHelper.getLifecyclePath(start, finish, excludeLastState);
-        performLifecycleSequence(r, path);
-    }
-
-TransactionExecutor#performLifecycleSequence 解析：
-    private void performLifecycleSequence(ActivityClientRecord r, IntArray path) {
-        final int size = path.size();
-        //遍历生命周期轨迹的路线，一个个按顺序执行
-        for (int i = 0, state; i < size; i++) {
-            state = path.get(i);
-            switch (state) {
-                ...
-                case ON_START:
-                    mTransactionHandler.handleStartActivity(r, mPendingActions);
-                    break;
-                ...
-            }
-        }
-    }
 ```
 
 
@@ -835,9 +462,7 @@ mLastFocusedStack管理的是上一次显示在前台Activity的Activity栈。
 
 
 
-
-
-#### Service
+### Service ✅
 
 ##### Service和Activity怎么进行数据交互 +4
 
@@ -947,244 +572,25 @@ onCreate() -> onBind() -> onUnbind() -> onDestory()
 4、随后服务进程走onBind生命周期，将返回的IBinder对象回传给AMS；
 5、AMS根据绑定者的信息，找到绑定者的ServiceConnection，并将IBinder对象以及ServiceConnection对象传回绑定者进程；
 6、绑定者进程post runnable回主线程后调用ServiceConnection对象的onServiceConnected方法传入IBinder对象。
-
-  
-详细分析：
-startService：
-
-onCreate:
-ContextImpl#startService -> ContextImpl#startServiceCommon -> AMS#startService -> ActiveServices#startServiceLocked -> ActiveServices#startServiceInnerLocked -> ActiveServices#bringUpServiceLocked -> ActiveServices#realStartServiceLocked ->（app）ActivityThread#scheduleCreateService（sendMsg CREATE_SERVICE）-> ActivityThread#handleCreateService -> onCreate
-
-onStartCommand:
-ActiveServices#realStartServiceLocked -> ActiveServices#sendServiceArgsLocked -> app）ActivityThread#scheduleServiceArgs（sendMsg SERVICE_ARGS）-> ActivityThread.H#handleMessage（SERVICE_ARGS）-> ActivityThread#handleServiceArgs -> onStartCommand
-
-关键点：
-ActiveServices类：AMS里边有一个对象mServices（ActiveServices），ActiveServices类是负责Service相关的逻辑，包括启动，停止，和绑定，以及重启生命周期的调用等。
-
-ActivityThread#handleCreateService 解析：反射创建Service对象，并且调用onCreate方法
-	private void handleCreateService(CreateServiceData data) {
-	    ...
-	    LoadedApk packageInfo = getPackageInfoNoCheck(data.info.applicationInfo, data.compatInfo);
-	    Service service = null;
-	    try {
-	        java.lang.ClassLoader cl = packageInfo.getClassLoader(); //反射创建Service对象
-	        service = (Service) cl.loadClass(data.info.name).newInstance();
-	    } catch (Exception e) {}
-
-	    try {
-	        ContextImpl context = ContextImpl.createAppContext(this, packageInfo);
-	        ...
-	        //如果Application没有创建，则创建一个Application对象。
-	        Application app = packageInfo.makeApplication(false, mInstrumentation);
-
-	        service.attach(context, this, data.info.name, data.token, app, ActivityManager.getService());
-
-	        //调用Service的onCreate方法
-	        service.onCreate();
-	        ...
-	        try {
-	            ActivityManager.getService().serviceDoneExecuting(
-	                    data.token, SERVICE_DONE_EXECUTING_ANON, 0, 0);
-	        } catch (RemoteException e) {}
-	    } catch (Exception e) {}
-	}
-
-
-
-bindService：
-
-ContextImpl#bindService -> ContextImpl#bindServiceCommon -> AMS#bindService -> ActiveServices#bindServiceLocked -> ActiveServices#bringUpServiceLocked（这里开始与startService流程一直了）-> ActiveServices#realStartServiceLocked ->（app）ActivityThread#scheduleCreateService（sendMsg CREATE_SERVICE）-> ActivityThread.H#handleMessage（CREATE_SERVICE）-> ActivityThread#handleCreateService -> onCreate
-
-onBind生命周期执行流程：
-ActiveServices#realStartServiceLocked -> ActiveServices#requestServiceBindingsLocked（只有bindService才执行） -> ActiveServices#requestServiceBindingLocked -> （app）ActivityThread#scheduleBindService（sendMsg BIND_SERVICE） -> ActivityThread#handleBindService -> onBind或onRebind
-
-关键点：
-ActiveServices#realStartServiceLocked 解析：
-	private final void realStartServiceLocked(ServiceRecord r, ProcessRecord app, boolean execInFg) throws RemoteException {
-	    ...
-	    try {
-	        ...
-	        app.thread.scheduleCreateService(r, r.serviceInfo, mAm.compatibilityInfoForPackageLocked(r.serviceInfo.applicationInfo), app.repProcState);
-	    } catch (DeadObjectException e) { } finally { }
-	    ...
-	    requestServiceBindingsLocked(r, execInFg); //bindService会在该方法里边执行逻辑
-
-	    updateServiceClientActivitiesLocked(app, null, true);
-
-	    if (r.startRequested && r.callStart && r.pendingStarts.size() == 0) {
-	        r.pendingStarts.add(new ServiceRecord.StartItem(r, false, r.makeNextStartId(),
-	                null, null, 0));
-	    }
-
-	    sendServiceArgsLocked(r, execInFg, true); //如果是startService，这里会走onStartCommand
-
-	    if (r.delayed) {
-	        getServiceMapLocked(r.userId).mDelayedStartList.remove(r);
-	        r.delayed = false;
-	    }
-	   	...
-	}
-
-	private final void requestServiceBindingsLocked(ServiceRecord r, boolean execInFg)throws TransactionTooLargeException {
-		//只有bindService的时候，r.bindings才有值
-	    for (int i=r.bindings.size()-1; i>=0; i--) {
-	        IntentBindRecord ibr = r.bindings.valueAt(i);
-	        if (!requestServiceBindingLocked(r, ibr, execInFg, false)) {
-	            break;
-	        }
-	    }
-	}
-
-	private final boolean requestServiceBindingLocked(ServiceRecord r, IntentBindRecord i, boolean execInFg, boolean rebind) throws TransactionTooLargeException {
-	    ...
-	    if ((!i.requested || rebind) && i.apps.size() > 0) {
-	        try {
-	            bumpServiceExecutingLocked(r, execInFg, "bind");
-	            r.app.forceProcessStateUpTo(ActivityManager.PROCESS_STATE_SERVICE);
-	            //绑定Service对象
-	            r.app.thread.scheduleBindService(r, i.intent.getIntent(), rebind, r.app.repProcState);
-	            if (!rebind) {
-	                i.requested = true;
-	            }
-	            i.hasBound = true;
-	            i.doRebind = false;
-	        } catch (TransactionTooLargeException e) {} catch (RemoteException e) {}
-	    }
-	    return true;
-	}
-
-
-ActivityThread#handleBindService 解析：
-	private void handleBindService(BindServiceData data) {
-	    //获取Service对象
-	    Service s = mServices.get(data.token); 
-	    if (s != null) {
-	        try {
-	           	...
-	            try {
-	                if (!data.rebind) { //判断是否为重新绑定
-	                    //走onBind生命周期，并且获取返回值IBinder对象
-	                    IBinder binder = s.onBind(data.intent);
-	                    //将IBinder对象，传给AMS
-	                    ActivityManager.getService().publishService(data.token, data.intent, binder);
-	                } else { //重新绑定走onRebind生命周期
-	                    s.onRebind(data.intent);
-	                    ActivityManager.getService().serviceDoneExecuting(data.token, SERVICE_DONE_EXECUTING_ANON, 0, 0);
-	                }
-	                ...
-	            } catch (RemoteException ex) {}
-	        } catch (Exception e) {}
-	    }
-	}
-
-给启动者执行ServiceConnection回调：
-在onBind生命周期回调之后，会调用AMS#publishService。
-AMS#publishService -> ActiveServices#publishServiceLocked -> （app）ConnectionRecord.InnerConnection（继承自IServiceConnection）#connected -> LoadedApk.ServiceDispatcher#connected（post runnable） -> LoadedApk.ServiceDispatcher#doConnected -> ServiceConnection#onServiceConnected
-
-void publishServiceLocked(ServiceRecord r, Intent intent, IBinder service) {
-    final long origId = Binder.clearCallingIdentity();
-    try {
-        if (r != null) {
-            Intent.FilterComparison filter
-                    = new Intent.FilterComparison(intent);
-            IntentBindRecord b = r.bindings.get(filter);
-            if (b != null && !b.received) {
-                b.binder = service;
-                b.requested = true;
-                b.received = true;
-                //ServiceRecord的connections是一个ArrayMap对象。
-                //遍历该ArrayMap对象的Value值，Value值是一个ArrayList对象
-                //遍历ArrayList对象，获取每一个ConnectionRecord对象，通过filter找到
-                //相应的ConnectionRecord对象
-                for (int conni=r.connections.size()-1; conni>=0; conni--) {
-                    ArrayList<ConnectionRecord> clist = r.connections.valueAt(conni);
-                    for (int i=0; i<clist.size(); i++) {
-                        ConnectionRecord c = clist.get(i);
-                        if (!filter.equals(c.binding.intent.intent)) {
-                            continue;
-                        }
-                        try {
-                            //c是ConnectionRecord对象，其中的conn是InnerConnection
-                            //对象，这里实际上是调用了InnerConnection的connected方法。
-                            c.conn.connected(r.name, service, false);
-                        } catch (Exception e) {
-                        }
-                    }
-                }
-            }
-
-            serviceDoneExecutingLocked(r, mDestroyingServices.contains(r), false);
-        }
-    } finally {
-        Binder.restoreCallingIdentity(origId);
-    }
-}
-
-public void doConnected(ComponentName name, IBinder service, boolean dead) {
-    ServiceDispatcher.ConnectionInfo old;
-    ServiceDispatcher.ConnectionInfo info;
-
-    synchronized (this) {
-        old = mActiveConnections.get(name);
-        //Service已经绑定过了
-        if (old != null && old.binder == service) {
-            return;
-        }
-        //将新的Service信息存储起来
-        if (service != null) {
-            info = new ConnectionInfo();
-            info.binder = service;
-            info.deathMonitor = new DeathMonitor(name, service);
-            try {
-                service.linkToDeath(info.deathMonitor, 0);
-                mActiveConnections.put(name, info);
-            } catch (RemoteException e) {
-                mActiveConnections.remove(name);
-                return;
-            }
-        } else {
-            mActiveConnections.remove(name);
-        }
-        if (old != null) {
-            old.binder.unlinkToDeath(old.deathMonitor, 0);
-        }
-    }
-
-    ///将旧的Service进行解绑的操作
-    if (old != null) {
-        mConnection.onServiceDisconnected(name);
-    }
-    if (dead) {
-        mConnection.onBindingDied(name);
-    }
-    //调用mConnection对象的onServiceConnected方法绑定新的Service
-    //这里的mConnection就是ServiceConnection对象，也即是我们最开始调用bindService方法时
-    //传进来的参数。这里的service参数就是Service服务的onBind方法返回的IBinder对象。
-    if (service != null) {
-        mConnection.onServiceConnected(name, service);
-    }
-}
 ```
 
 
 
-1. startService、bindService的区别？生命周期一样吗? +3
+### BroadcastReceiver
 
-4. Service与Activity 是在同一个线程吗？为什么？+2
+##### 说说Broadcast的注册方式与区别。+3
 
-   
+##### 有序广播与无序广播的区别。
 
-#### BroadcastReceiver
+##### BroadcastReceiver 与 LocalBroadcastReceiver 有什么区别？
 
-1. 说说Broadcast的注册方式与区别。+3
 
-2. 有序广播与无序广播的区别。
 
-3. BroadcastReceiver 与 LocalBroadcastReceiver 有什么区别？
 
-   
 
-#### Fragment
+## Android UI
+
+### Fragment ✅
 
 ##### 说说你对Fragment的了解。
 
@@ -1493,34 +899,7 @@ FragmentPageAdapter：分离Fragment，但会缓存其实例
 
 
 
-#### Handler
-
-（handler的更多问题：[面试中 - Handler引发的那些灵魂拷问](https://blog.csdn.net/yudan505/article/details/113716381)）
-
-1. Looper死循环为什么不会触发ANR？+4
-
-2. 说说android消息机制。
-
-3. 两个线程能使用handler通讯吗？为什么？
-
-4. HandlerThread是什么？
-
-5. 单线程模式中Message、Handler、MessageQueue、Looper之间的关系。
-
-6. Handler的post(runnable)是如何实现的。callback、runnable、msg的优先级。
-
-7. Handler的阻塞是如何实现的。
-
-   
-
-#### RecycleView
-
-1. RecycleView与ListView的区别。+2
-2. 说说对RecycleView的了解。
-
-
-
-#### View
+### View ✅
 
 ##### Activity、Window、DecorView的关系。+2
 
@@ -1869,6 +1248,23 @@ Choreographer有监听Vsync信号，一旦收到信号就会执行doFrame方法�
 
 
 
+#### RecycleView
+
+##### RecycleView与ListView的区别。+2
+
+##### 说说对RecycleView的了解。
+
+
+
+#### 事件分发
+
+1. 触摸事件是如何传递的。+5
+2. 事件分发是使用了什么设计模式？（责任链模式）
+3. 如果解决滑动冲突？+2
+4. 同时给一个view和viewgroup设置了点击事件优先响应那个，为什么  ？
+
+
+
 #### 动画
 
 1. 简单说明android中的几种动画，以及他们的特点和区别。
@@ -1882,16 +1278,116 @@ Choreographer有监听Vsync信号，一旦收到信号就会执行doFrame方法�
 
 
 
-#### 事件分发
+## Framework
 
-1. 触摸事件是如何传递的。+5
-2. 事件分发是使用了什么设计模式？（责任链模式）
-3. 如果解决滑动冲突？+2
-4. 同时给一个view和viewgroup设置了点击事件优先响应那个，为什么  ？
+### Apk与打包流程
+
+1. apk如何脱壳。
+2. 如何进行多渠道打包？
+3. 打包app如何进行加固与混淆？
+4. 如何进行apk瘦身？
+5. 讲述下android的数字签名。
+6. apk打包过程中aar中是否包含R文件。
+7. jar、aar的区别。
+8. V1、V2、V3签名有什么区别。
 
 
 
-#### 数据存储
+1. 说说view的渲染过程（WMS）。+2
+
+2. 说说app的启动流程。+2
+
+3. 为什么Zygote进程与AMS之间是用Socket通信，而不是用Binder？
+
+   ```java
+   1、Socket比Binder性能更好？更安全？
+   反驳：
+   性能：Binder数据拷贝只需要拷贝一次，而Socket是要两次的。
+   安全：Binder：系统会为应用分配UID，可以同时支持实名和匿名。实名：系统服务是实名的。匿名：自定义的Service（其他进程拿不到）
+   	   Socket：依赖上层协议，访问接入点是开放性的，不安全。
+   
+     
+   2、Zygote进程没办法用Binder？
+   观点：
+     Zygote是Linux层就有的，而Binder是android层才有的。会不会Zygote启动的时候，还没有Binder呢？
+   反驳：
+     ServiceManager是一个守护进程，它维护着系统服务和客户端的Binder通信。Binder机制是基于   ServiceManager的。
+     ServiceManager在init进程启动后启动，Zygote进程在init之后。ServiceManager进程的启动远比zygote要 早。
+     在启动Zygote进程是需要用到ServiceManager进程的服务，那么显然Zygote是可以使用Binder的。
+   
+     
+   3、fork函数限制（多线程程序里不准使用fork）？
+   观点：
+     怕父进程binder线程有锁，然后子进程的主线程一直在等其子线程(从父进程拷贝过来的子进程)的资源，但是其实父	 进程的子进程并没有被拷贝过来，造成死锁。所以fork不允许存在多线程。
+     而非常巧的是Binder通讯偏偏就是多线程，所以干脆父进程（Zygote）这个时候就不使用binder线程。
+   
+   反驳：
+     应该是有办法让Zygote主线程直接作为一个唯一的Binder线程。
+     让init启动Zygote时直接将Zygote主线程注册成Binder线程并且是唯一线程。
+   
+     
+   所有我感觉，Zygote应该是可以用Binder替换Socket。
+   网上很多都是偏向于 -> Binder是多线程的所以不能用在有fork的Zygote中。
+   ```
+
+   
+
+4. launcher启动程序 跟 另一个程序跳转过去两者有什么区别？
+
+5. Activity是在哪里创建的。Application是在哪里创建的。与AMS是如何交互的。
+
+5. 说说类加载器的双亲委托机制。
+
+
+
+## Android核心机制
+
+### Context
+
+##### 说说你对Context的了解。
+
+##### Activity、Context、Application三者有什么不同。+2
+
+##### Intent的作用。
+
+##### 创建dialog所需的上下文为什么必须是Activity
+
+
+
+### Handler ✅
+
+（handler的更多问题：[面试中 - Handler引发的那些灵魂拷问](https://blog.csdn.net/yudan505/article/details/113716381)）
+
+
+
+### Binder
+
+1. android进程间通讯方式有哪些？
+
+2. binder优势是什么？
+
+3. 说说aidl生成java类的细节。
+
+4. 进程间通讯遇到过哪些问题？
+
+   
+
+## 性能优化
+
+1. 内存泄漏是如果产生的？如何解决？+3
+2. 内存泄漏与内存抖动的区别。+3
+3. 怎么app优化启动速度。
+4. 如何监测内存泄漏。
+5. 什么是ANR，如何避免它？
+6. 如何进行app性能优化、内存优化、cpu使用率优化？
+7. 内存泄漏的分类。如何分析内存泄漏问题。
+8. native崩溃日志如何采集，怎么处理？
+
+
+
+## 其他
+
+### 数据存储
 
 1. SharedPreference能多进程访问吗？进程间数据共享有什么方式？
 2. SharedPreference是如何存储的？存储位置在哪里？
@@ -1900,66 +1396,7 @@ Choreographer有监听Vsync信号，一旦收到信号就会执行doFrame方法�
 
 
 
-#### 性能优化
-
-1. 内存泄漏是如果产生的？如何解决？+3
-
-2. 内存泄漏与内存抖动的区别。+3
-
-3. 怎么app优化启动速度。
-
-4. 如何监测内存泄漏。
-
-5. 什么是ANR，如何避免它？
-
-6. 如何进行app性能优化、内存优化、cpu使用率优化？
-
-7. 内存泄漏的分类。如何分析内存泄漏问题。
-
-8. native崩溃日志如何采集，怎么处理？
-
-   
-
-#### Apk与打包流程
-
-1. apk如何脱壳。
-
-2. 如何进行多渠道打包？
-
-3. 打包app如何进行加固与混淆？
-
-4. 如何进行apk瘦身？
-
-5. 讲述下android的数字签名。
-
-6. apk打包过程中aar中是否包含R文件。
-
-7. jar、aar的区别。
-
-8. V1、V2、V3签名有什么区别。
-
-   
-
-#### 进程间通讯
-
-1. android进程间通讯方式有哪些？
-2. binder优势是什么？
-3. 说说aidl生成java类的细节。
-4. 进程间通讯遇到过哪些问题？
-
-
-
-#### Framework
-
-1. 说说view的渲染过程（WMS）。+2
-2. 说说app的启动流程。+2
-3. launcher启动程序 跟 另一个程序跳转过去两者有什么区别？
-4. Activity是在哪里创建的。Application是在哪里创建的。与AMS是如何交互的。
-5. 说说类加载器的双亲委托机制。
-
-
-
-#### 功能设计相关
+### 功能设计相关
 
 1. 如何设计一个类似微信朋友圈首页功能，包括UI、数据等方面。
 2. 如何设计一个无线数据的气泡显示聊天内容。
@@ -1967,79 +1404,17 @@ Choreographer有监听Vsync信号，一旦收到信号就会执行doFrame方法�
 4. 如何做到单个信号源，多个页面响应。
 5. 设计一个日志系统。
 
-
-
-#### 其他
+### 其他
 
 1. 怎么终止一个app?
-3. 说说进程如何保活。+2
-4. 说说屏幕适配方案。+2
+2. 说说进程如何保活。+2
+3. 说说屏幕适配方案。+2
 4. 说说android中进程优先级。
 5. AsyncTask是什么，使用方法，使用时候需要注意什么？
 6. 说说AsyncTask的原理，聊聊它的缺陷和问题。
 7. 聊聊android各个版本的新特性。
 8. android为每个应用程序分配的内存是多少。
 9. JSbridge是如何实现js与native联通的。
-
-
-
-## Android第三方库
-
-#### RxJava
-
-#### OKHttp
-
-#### Retrofit
-
-1. 说说你对retrofit的了解。
-
-   
-
-#### Glide
-
-
-
-#### Databinding
-
-1. 说说databinding的原理。
-
-   
-
-#### 插件化
-
-1. 启动Activity的hook方式。taskAffity。
-
-   
-
-#### 其他
-
-1. 组件化中module和app之间的区别。module通信是如何实现的。
-
-
-
-## Kotlin
-
-#### 协程
-
-1. 说说kotlin的协程。+3
-2. 概括一下kotlin协程的上下文。
-3. 协程是如何挂起的。
-
-
-
-#### 语法相关
-
-1. 高阶函数是什么？
-2. ==与===的区别。
-3. lateinit与lazy的区别。
-
-
-
-#### 其他
-
-1. kotlin与java有什么区别。+3
-2. kotlin有什么优缺点？+2
-3. kotlin的lambda与java的lambda有什么区别。
 
 
 
@@ -2092,8 +1467,3 @@ Choreographer有监听Vsync信号，一旦收到信号就会执行doFrame方法�
 
 4. :: 与 : 的区别。
 
-   
-
-#### 其他
-
-1. 视频编解码是怎么做的。
