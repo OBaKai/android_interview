@@ -1,10 +1,31 @@
-详细分析：
-startService：
+## start方式的启动流程
 
-onCreate:
+#### 总结
+
+```java
+生命周期：
+onCreate() -> onStartCommand() -> onDestory()
+
+特点：
+1、如果服务已经开启，不会执行 onCreate()， 而是会调用onStartCommand()；
+2、一旦服务开启跟启动者就没有任何关系了。
+
+启动流程：（所有生命周期都是在主线程执行的）
+1、应用进程通知AMS要启动Service；
+2、AMS构建好ServiceRecord之后，通知服务进程（有可能是跨进程启动）创建Service实例，再执行通知服务进程走onStartCommand逻辑；
+3、服务进程通过反射创建Service对象，并且调用其onCreate生命周期；
+4、服务进程通知AMS，Service启动完成。
+```
+
+
+
+#### 源码分析
+
+```java
+onCreate：
 ContextImpl#startService -> ContextImpl#startServiceCommon -> AMS#startService -> ActiveServices#startServiceLocked -> ActiveServices#startServiceInnerLocked -> ActiveServices#bringUpServiceLocked -> ActiveServices#realStartServiceLocked ->（app）ActivityThread#scheduleCreateService（sendMsg CREATE_SERVICE）-> ActivityThread#handleCreateService -> onCreate
-
-onStartCommand:
+  
+onStartCommand：
 ActiveServices#realStartServiceLocked -> ActiveServices#sendServiceArgsLocked -> app）ActivityThread#scheduleServiceArgs（sendMsg SERVICE_ARGS）-> ActivityThread.H#handleMessage（SERVICE_ARGS）-> ActivityThread#handleServiceArgs -> onStartCommand
 
 关键点：
@@ -37,11 +58,36 @@ ActivityThread#handleCreateService 解析：反射创建Service对象，并且�
 	        } catch (RemoteException e) {}
 	    } catch (Exception e) {}
 	}
+```
 
 
 
-bindService：
+## bind方式的启动流程
 
+#### 总结
+
+```java
+生命周期：
+onCreate() -> onBind() -> onUnbind() -> onDestory()
+
+特点：
+1、绑定服务不会调用 onStartCommand() 方法。
+2、绑定成功后，绑定者就能够持有服务的IBinder对象，双方就能够通信了。
+
+启动流程：（所有生命周期都是在主线程执行的。ServiceConnection回调也是在主线程执行的）
+1、应用进程通知AMS要绑定Service，并记录绑定者的信息以及ServiceConnection对象；
+2、AMS构建好ServiceRecord之后，通知服务进程（有可能是跨进程启动）创建Service实例，再执行通知服务进程走onBind逻辑；
+3、服务进程通过反射创建Service对象，并且调用其onCreate生命周期；
+4、随后服务进程走onBind生命周期，将返回的IBinder对象回传给AMS；
+5、AMS根据绑定者的信息，找到绑定者的ServiceConnection，并将IBinder对象以及ServiceConnection对象传回绑定者进程；
+6、绑定者进程post runnable回主线程后调用ServiceConnection对象的onServiceConnected方法传入IBinder对象。
+```
+
+
+
+#### 源码分析
+
+```java
 ContextImpl#bindService -> ContextImpl#bindServiceCommon -> AMS#bindService -> ActiveServices#bindServiceLocked -> ActiveServices#bringUpServiceLocked（这里开始与startService流程一直了）-> ActiveServices#realStartServiceLocked ->（app）ActivityThread#scheduleCreateService（sendMsg CREATE_SERVICE）-> ActivityThread.H#handleMessage（CREATE_SERVICE）-> ActivityThread#handleCreateService -> onCreate
 
 onBind生命周期执行流程：
@@ -213,3 +259,7 @@ public void doConnected(ComponentName name, IBinder service, boolean dead) {
         mConnection.onServiceConnected(name, service);
     }
 }
+```
+
+
+
