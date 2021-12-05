@@ -551,10 +551,11 @@ onCreate() -> onStartCommand() -> onDestory()
 2、一旦服务开启跟启动者就没有任何关系了。
 
 启动流程：（所有生命周期都是在主线程执行的）
-1、应用进程通知AMS要启动Service；
-2、AMS构建好ServiceRecord之后，通知服务进程（有可能是跨进程启动）创建Service实例，再执行通知服务进程走onStartCommand逻辑；
-3、服务进程通过反射创建Service对象，并且调用其onCreate生命周期；
-4、服务进程通知AMS，Service启动完成。
+1、应用进程调用startService，通知AMS要启动Service；
+2、AMS构建好ServiceRecord之后，检查该Service是否已经创建（ServiceRecord#app、ServiceRecord#appThread != null）;
+3、如果Service已经创建了，通知应用进程执行Service#onStartCommand；
+4、如果Service没有创建，通知应用进程创建Service，应用进程创建Service对象并执行其onCreate，最后将Service对象缓存起来。紧接着AMS会通知进程执行Service#onStartCommand；
+5、如果需要启动的Service的进程未启动，AMS会先叫Zygote孵化该进程，然后将创建Service动作延后处理。等到进程通知AMS自己已经启动完成后，AMS就会通知进程走创建Service的逻辑。
 
 
 bindService
@@ -565,26 +566,116 @@ onCreate() -> onBind() -> onUnbind() -> onDestory()
 1、绑定服务不会调用 onStartCommand() 方法。
 2、绑定成功后，绑定者就能够持有服务的IBinder对象，双方就能够通信了。
 
-启动流程：（所有生命周期都是在主线程执行的。ServiceConnection回调也是在主线程执行的）
-1、应用进程通知AMS要绑定Service，并记录绑定者的信息以及ServiceConnection对象；
-2、AMS构建好ServiceRecord之后，通知服务进程（有可能是跨进程启动）创建Service实例，再执行通知服务进程走onBind逻辑；
-3、服务进程通过反射创建Service对象，并且调用其onCreate生命周期；
-4、随后服务进程走onBind生命周期，将返回的IBinder对象回传给AMS；
-5、AMS根据绑定者的信息，找到绑定者的ServiceConnection，并将IBinder对象以及ServiceConnection对象传回绑定者进程；
-6、绑定者进程post runnable回主线程后调用ServiceConnection对象的onServiceConnected方法传入IBinder对象。
+绑定流程：（所有生命周期都是在主线程执行的。ServiceConnection回调也是在主线程执行的）
+1、应用进程通知AMS要绑定Service，AMS记录绑定者的信息以及ServiceConnection对应的Binder对象（IServiceConnection）；
+2、AMS构建好ServiceRecord之后，通知服务进程启动Service（跟startService启动流程一样），如果服务进程没启动就先启动进程，如果服务没启动就启动服务（服务进程会创建Service对象，并且调用其onCreate生命周期）。
+3、服务启动后，AMS会向其请求回去Binder对象，这时服务进程就会回调服务的onBind，并且返回Binder对象给AMS。
+4、AMS拿到服务的Binder对象后，就会给应用进程发布这个Binder对象，通过调用应用进程的IServiceConnection#connected发布到应用进程。
+5、应用进程这边会在ServiceConnection#onServiceConnected中回调服务的IBinder对象，自此绑定流程就结束了。
 ```
 
 
 
-### BroadcastReceiver
+### BroadcastReceiver ✅
 
 ##### 说说Broadcast的注册方式与区别。+3
 
+```java
+动态注册的接收者：
+  1、创建好的接收者对象，在注册时会根据Context缓存到对应的Map中；
+	2、然后会通知AMS自己要一个动态广播，AMS会根据传过来的IIntentReceiver对象也缓存到对应的一个Map中。
+
+静态注册的接收者：
+  1、在清单文件定义好的广播接收者，在app安装完成 或者 系统启动后清单文件会被PMS扫描；
+  2、PMS将广播接收者的描述信息保存在PMS里边的mReceivers容器中。
+ 
+广播分发流程：
+  1 AMS根据广播的描述，收集符合条件的接收者；
+  2 如果该广播是无序广播；
+      2.1 查询出符合条件的动态接收者，将它们封装到一个BroadcastRecord，然后将BroadcastRecord加入到一个无序队列之后，走分发流程（并行分发）。
+      2.2 通过PMS查询出符合条件的静态接收者，将它们封装到一个BroadcastRecord，然后将BroadcastRecord加入到一个有序队列之后，走分发流程（串行分发）。
+  3 如果该广播是有序广播；
+      会将符合条件的动态接收者 以及 静态接收者根据广播优先级合并到一起。将它们封装到一个BroadcastRecord，然后将BroadcastRecord加入到一个有序队列之后，走分发流程（串行分发）。
+  4 分发机制在BroadcastQueue中实现；(mParallelBroadcasts（无序队列）、mOrderedBroadcasts（有序队列）)
+      4.1 优先遍历无序队列，并行分发广播给所有的接收者。
+          遍历接收者们，通通给它们每人发一次广播，发了就完事。也不需要它们告诉AMS自己有没有收到。
+      4.2 接着遍历有序队列，串行分发广播给所有的接收者。
+          4.2.1 如果该接收者是动态注册的，直接分发。
+          4.2.2 如果该接收者是静态注册的，就先看进程是否已经启动，如果启动了直接分发。
+          4.2.3 如果接收者的进程没有启动，先将广播标记为pending，进程启动后在attachApplication时继续处理这个pending的广播。
+          4.2.4 串行机制：接收者收到广播后，告诉AMS已经收到了，AMS就会让BroadcastQueue继续分发广播给下一个接收者。
+          4.2.5 超时机制：在分发广播前会发出一个延时Msg，用来防止分发广播时间过长。如果广播分发超时了，会放弃本次分发，处理下一个分发。
+
+区别：
+  1、动态注册接收者缓存在AMS中，静态注册接收者缓存在PMS中。
+  2、无序广播分发过程中，动态注册接收者是优先分发的，并且分发方式是并行分发（更快收到广播），静态注册接收者是是在串行分发的。有序广播分发过程中，不管是动态注册接收者还是静态注册接收者，统一是串行分发。
+```
+
+
+
 ##### 有序广播与无序广播的区别。
+
+```java
+1 AMS根据广播的描述，收集符合条件的接收者；
+2 如果该广播是无序广播；
+    2.1 查询出符合条件的动态接收者，将它们封装到一个BroadcastRecord，然后将BroadcastRecord加入到一个无序队列之后，走分发流程（并行分发）。
+    2.2 通过PMS查询出符合条件的静态接收者，将它们封装到一个BroadcastRecord，然后将BroadcastRecord加入到一个有序队列之后，走分发流程（串行分发）。
+3 如果该广播是有序广播；
+    会将符合条件的动态接收者 以及 静态接收者根据广播优先级合并到一起。将它们封装到一个BroadcastRecord，然后将BroadcastRecord加入到一个有序队列之后，走分发流程（串行分发）。
+
+4 分发机制在BroadcastQueue中实现；(mParallelBroadcasts（无序队列）、mOrderedBroadcasts（有序队列）)
+    4.1 优先遍历无序队列，并行分发广播给所有的接收者。
+        遍历接收者们，通通给它们每人发一次广播，发了就完事。也不需要它们告诉AMS自己有没有收到。
+    4.2 接着遍历有序队列，串行分发广播给所有的接收者。
+        4.2.1 如果该接收者是动态注册的，直接分发。
+        4.2.2 如果该接收者是静态注册的，就先看进程是否已经启动，如果启动了直接分发。
+        4.2.3 如果接收者的进程没有启动，先将广播标记为pending，进程启动后在attachApplication时继续处理这个pending的广播。
+        4.2.4 串行机制：接收者收到广播后，告诉AMS已经收到了，AMS就会让BroadcastQueue继续分发广播给下一个接收者。
+        4.2.5 超时机制：在分发广播前会发出一个延时Msg，用来防止分发广播时间过长。如果广播分发超时了，会放弃本次分发，处理下一个分发。
+```
+
+
 
 ##### BroadcastReceiver 与 LocalBroadcastReceiver 有什么区别？
 
+```java
+LocalBroadcastManager（单例）
+	维护着三个容器：
+	private final HashMap<BroadcastReceiver, ArrayList<ReceiverRecord>> mReceivers = new HashMap<>();
+  private final HashMap<String, ArrayList<ReceiverRecord>> mActions = new HashMap<>();
+  private final ArrayList<BroadcastRecord> mPendingBroadcasts = new ArrayList<>();
 
+registerReceiver方法：（注册接收者）
+	1、根据 receiver 和 filter 创建ReceiverRecord，存入 mReceivers 里边对应的list中；
+	2、根据 filter 中的 action 将上边创建的ReceiverRecord，存入 mActions 里边对应的list中。
+  mReceivers中存放的是已注册的receiver以及其对应的ReceiverRecord，同一个receiver如果多次用相同的filter不会生效多次，但是如果filter不同注册多次，那么就会在mReceivers存储多个ReceiverRecord；
+  mAction中存放的是已注册的所有action，以及这个action对应的ReceiverRecord，如果这个filter中有多个action，那么就会存储多个相同的ReceiverRecord。
+
+unregisterReceiver方法：（反注册接收者）
+	分别从mReceivers、mActions移除对应的缓存数据（与registerReceiver方法刚好相反的操作）
+
+sendBroadcast方法：（发送广播）
+	1、根据 action 从 mActions 取出对应的ArrayList<ReceiverRecord>；
+	2、遍历ArrayList<ReceiverRecord>，用filter与广播的Intent信息进行匹配，匹配成功就加入分发队列mPendingBroadcasts；
+	3、发送handle消息MSG_EXEC_PENDING_BROADCASTS，在主线程中执行发送广播；
+	4、发送广播逻辑（executePendingBroadcasts方法）：遍历mPendingBroadcasts取出每个ReceiverRecord，轮询ReceiverRecord内的接收者，调用其onReceive方法。
+
+sendBroadcastSync方法：（同步发送广播）
+	public void sendBroadcastSync(@NonNull Intent intent) {
+        if (sendBroadcast(intent)) {
+            executePendingBroadcasts(); //从handler改为直接执行。
+        }
+    }
+
+
+区别：
+BroadcastReceiver是注册到AMS中的，能实现跨进程接收广播。广播是通过AMS分发过来的。
+LocalBroadcastReceiver本身是一个单例，接收者注册到这个单例里边的一个容器中。广播发送也是通过这个单例实现的，遍历接收者容器中符合条件的对象调用其onReceive。
+```
+
+
+
+### ContentProvider
 
 
 
