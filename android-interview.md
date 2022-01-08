@@ -675,7 +675,112 @@ LocalBroadcastReceiver本身是一个单例，接收者注册到这个单例里�
 
 
 
-### ContentProvider
+### ContentProvider ✅
+
+##### ContentProvider是什么，作用是什么。
+
+```java
+ContentProvider的作用是为不同的应用之间数据共享，提供统一的接口。
+安卓系统中应用内部的数据是对外隔离的，要想让其它应用能使用自己的数据（例如通讯录）这个时候就用到了ContentProvider。
+
+通过 URI（统一资源标识符）来标识其它应用要访问的数据。
+	每一个 ContentProvider 都拥有一个公共的URI，用于表示这个 ContentProvider 所提供的数据。
+	例如：  content://com.xxx.xx/User/1
+	content://：主题，ContentProvider的标准前缀
+	com.xxx.xx：授权信息，URI的标识用于唯一标识这个 ContentProvider ，外部调用者可以根据这个标识来找到它。
+	User：路径，通俗的讲就是你要操作的数据库中表的名字，
+	1：记录，如果URI中包含表示需要获取的记录的 ID；则就返回该id对应的数据，如果没有 ID，就表示返回全部。
+通过 ContentResolver（内容解析者）的增、删、改、查方法实现对共享数据的操作。
+通过 ContentObserver（内容观察者）来监听数据是否发生了变化来对应的刷新页面。
+```
+
+
+
+##### ContentProvider,ContentResolver,ContentObserver之间的关系
+
+```java
+ContentProvider：管理数据，提供数据的增删改查操作，数据源可以是数据库、文件、XML、网络等。
+ContentResolver：外部进程可以通过 ContentResolver 与 ContentProvider 进行交互。其他应用中
+ContentResolver 可以不同 URI 操作不同的 ContentProvider 中的数据。
+ContentObserver：观察 ContentProvider 中的数据变化，并将变化通知给外界。
+```
+
+
+
+##### 说说ContentProvider的优点
+
+```java
+封装
+	采用ContentProvider方式，其 解耦了 底层数据的存储方式，使得无论底层数据存储采用何种方式，外界对数
+	据的访问方式都是统一的，这使得访问简单 & 高效
+	如一开始数据存储方式 采用 SQLite 数据库，后来把数据库换成 MongoDB，也不会对上层数据
+	ContentProvider使用代码产生影响
+提供一种跨进程数据共享的方式。
+	应用程序间的数据共享还有另外的一个重要话题，就是数据更新通知机制了。因为数据是在多个应用程序中共享
+	的，当其中一个应用程序改变了这些共享数据的时候，它有责任通知其它应用程序，让它们知道共享数据被修改了，
+	这样它们就可以作相应的处理。
+```
+
+
+
+##### 说说ContentProvider启动流程
+
+```java
+1、调用者是通过ContentResolver来增删查改。
+2、ContentResolver是个抽象类，ApplicationContentResolver继承了ContentResolver。
+ApplicationContentResolver是在ContextImpl构造函数中被创建。可以通过Content#getContentResolver方法使用到它。
+3、ContentResolver在调用insert、delete、update、query的时候，ContentProvider才会被启动。
+4、调用者进程会向AMS请求ContentProviderHodler。
+5、AMS收到调用者进程的请求，就会处理返回Hodler逻辑
+  5.1 如果Provider对应的ContentProviderRecord存在，直接返回Hodler。
+  5.2 如果Provider对应的ContentProviderRecord不存在，创建一个。
+  	5.2.1 如果ContentProvider能跑在调用者进程，直接返回Hodler（该Holder不会带有Binder对象）。否则继续往下走。
+  	5.2.2 如果ContentProvider所在进程没有启动，就先启动进程，然后等待发布Binder对象，完成的时候返回Hodler。
+  	5.2.3 如果ContentProvider所在进程已经启动，请求发布Binder对象，然后等待发布Binder对象，完成的时候返回Hodler。
+  	备注：AMS等待（wait()）的过程中会一直阻塞调用者进程的那条binder线程，直到Provider所在的进程发布Binder对象给AMS（发布完成后会notifyAll()）。
+6、调用者进程安装ContentProviderHodler，获取IContentProvider。
+  如果Hodler带有IContentProvider，则直接返回。
+  如果Hodler没有IContentProvider，证明ContentProvider能跑在调用者进程，需要调用者进程自行安装。
+  则直接创建一个ContentProvider对象，并让其走onCreate生命周期。IContentProvider则从ContentProvider#getIContentProvider方法中获取得到。
+
+
+Provider进程发布Binder对象的两种方式：
+  1、Provider所在进程启动时主动发布Provider的Binder对象。
+  	AMS会在Provider所在进程启动后，通知它需要启动哪些Provider（AMS#attachApplicationLocked）。当启动完那些需要启动的Provider后，进程就会发布Binder对象到AMS。
+  	备注：Provider启动是在Application对象创建之后执行的。（Application#attachBaseContext -> ContentProvider#onCreate -> Application#onCreate）
+  
+  2、AMS向Provider所在进程申请Binder对象。
+  	Provider所在的进程，就会启动该Provider（Provider走onCreate）
+```
+
+
+
+##### 为什么ContentProvider#onCreate 比 Application#onCreate快
+
+```java
+app启动流程中的Application启动流程：
+1、在app进程启动完成之后，会通知AMS自己进程已经启动完成了。
+2、AMS会通知app进程执行启动Application流程，并且会把该app的所有在清单文件注册的Provider信息返回给app进程。
+3、app进程在创建完Application实例，走了Application#attachBaseContext之后。会先遍历AMS传过来的Provider信息列表，先安装这些Provider，这时Provider就会走onCreate。并且会把Provider的binder对象发布给AMS。
+4、完成安装Provider之后，Application才会走onCreate。
+
+为什么安装ContentProvider要比Application启动要先走？
+因为如果有调用者进程需要用到某个Provider，但是这个Provider无法在调用者进程安装的情况下。AMS会查找这个Provider有没有发布binder对象到AMS，如果没有并且Provider所在进程没有启动，AMS就会启动这个进程，等待binder对象的发布，并且阻塞调用者进程的这条binder线程。
+如果Provider进程是在这种情况下被启动的，那么Provider组件的启动就显得尤为重要了，所以Provider的启动才会比Application要快。如果给Application流程先走完，Application#onCreate里边开发者会初始化一大堆东西，会耽误不少时间。
+
+那为什么Application#attachBaseContext又比ContentProvider#onCreate先走？
+Provider的启动需要用到Context。
+在创建完Application实例后Application的Context就创建好了，并且立马会调用attachBaseContext告诉外部，我的Context已经可以用了。
+```
+
+
+
+##### 为什么ContentProvider可以有多实例
+
+```java
+因为Provider除了能在Provider所在进程创建的话，还可以在调用者进程创建。
+只要符合这个条件：Provider所在进程的uid要跟调用者的uid相同。
+```
 
 
 

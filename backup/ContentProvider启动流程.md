@@ -166,7 +166,7 @@ private ContentProviderHolder installProvider(Context context,ContentProviderHol
 ```java
 //ProviderInfo info：全局变量，记录着提供者在清单文件中配置的信息
 //(info.multiprocess || info.processName.equals(app.processName))：要么支持多进程，要么跟调用者进程名称相同
-//uid == app.info.uid：支持者的uid要跟调用者的uid相同
+//uid == app.info.uid：提供者的uid要跟调用者的uid相同
 public boolean canRunHere(ProcessRecord app) {
     return (info.multiprocess || info.processName.equals(app.processName)) && uid == app.info.uid;
 }
@@ -275,7 +275,7 @@ private ContentProviderHolder getContentProviderImpl(IApplicationThread caller,
 //AMS#attachApplicationLocked
 private final boolean attachApplicationLocked(IApplicationThread thread,int pid, int callingUid, long startSeq) {
         ...
-        //从PMS那拿到提供者的注册信息
+        //从PMS那拿到所有在清单文件注册的Provider信息
         List<ProviderInfo> providers = generateApplicationProvidersLocked(app);
         //兜底的超时消息，防止提供者进程发布的Binder对象超时。 
         if (providers != null && checkAppInLaunchingProvidersLocked(app)) {
