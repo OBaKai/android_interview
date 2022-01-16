@@ -1467,10 +1467,489 @@ Choreographer有监听Vsync信号，一旦收到信号就会执行doFrame方法�
 
 
 
-#### Drawable与Bitmap
+#### Drawable
 
-1. 如果对bitmap进行压缩。
-2. 图片资源放在不同文件夹中，加载出来的内存占用分别是多少，为什么会这样？
+##### 说说drawable 与 mipmap 的区别
+
+```java
+google建议 只把app启动图标放在 mipmap 目录中，其他图片资源仍然放在 drawable 下面。
+
+mipmap是一种纹理映射技术，mipmap技术主要为了应对图片大小缩放的处理。为了提高缩小的速度和图片的质量，android会通过mipmap 技术提前对按缩小层级生成图片预先存储在内存中，这样来提高图片渲染的速度和质量。（使用mipmap技术会增加内存负担）
+
+mipmap 和 drawable 的区别也就是这个设置是否开启的区别。
+mipmap 目录下的图片默认 setHasMipMap 为 true
+drawable 默认 setHasMipMap 为 false
+```
+
+
+
+##### 什么是drawable？
+
+参考：https://blog.csdn.net/arnozhang12/article/details/52621191
+
+```java
+drawable：可简单理解为可绘制物，表示一些可以绘制在 Canvas 上的对象。在日常的工作开发中，我们为 UI 配置背景、图片、动画等等界面效果的时候，需要和众多的 Drawable 打交道。
+  
+Drawable
+    |- createFromPath
+    |- createFromResourceStream
+    |- createFromStream
+    |- createFromXml
+    |
+    |- inflate   : 从XML中解析属性，子类需重写
+    |- setAlpha  : 设置绘制时的透明度
+    |- setBounds : 设置Canvas为Drawable提供的绘制区域
+    |- setLevel  : 控制Drawable的Level值，这个值在ClipDrawable、RotateDrawable、ScaleDrawable、AnimationDrawable等Drawable中有重要作用；区间为[0, 10000]
+    |- draw(Canvas) : 绘制到Canvas上，子类必须重写
+```
+
+
+
+##### 说说drawable加载流程？
+
+参考：https://blog.csdn.net/brian512/article/details/53363642
+
+```java
+//以View加载背景资源为例：	
+public void setBackgroundResource(@DrawableRes int resid) {
+        if (resid != 0 && resid == mBackgroundResource) {
+            return;
+        }
+
+        Drawable d = null;
+        if (resid != 0) {
+            d = mContext.getDrawable(resid);
+        }
+        setBackground(d);
+
+        mBackgroundResource = resid;
+	}
+
+//Drawable的加载：缓存机制（缓存Drawable.ConstantState） + 享元（每个Drawable都是新对象）
+Resources#getDrawable -> Resources#getDrawableForDensity -> ResourcesImpl#loadDrawable -> ResourcesImpl#loadDrawableForCookie
+
+ResourcesImpl#decodeImageDrawable -> ImageDecoder#decodeDrawable -> BitmapFactory#decodeBitmap -> BitmapFactory#decodeResourceStream
+
+Drawable loadDrawable(@NonNull Resources wrapper, @NonNull TypedValue value, int id, int density, @Nullable Resources.Theme theme) throws NotFoundException {
+        ...
+
+        try {
+            ...
+            final Drawable.ConstantState cs;
+            if (isColorDrawable) { //是否为ColorDrawable
+                cs = sPreloadedColorDrawables.get(key); //从ColorDrawable缓存列表中获取
+            } else {
+                cs = sPreloadedDrawables[mConfiguration.getLayoutDirection()].get(key); //从BitmapDrawable缓存列表中获取
+            }
+
+            Drawable dr;
+            if (cs != null) {
+                dr = cs.newDrawable(wrapper);
+            } else if (isColorDrawable) {
+                dr = new ColorDrawable(value.data);
+            } else {
+                dr = loadDrawableForCookie(wrapper, value, id, density);
+            }
+            ...
+            if (dr != null) {
+                ...
+                if (useCache) {
+                    //将Drawable缓存起来
+                    cacheDrawable(value, isColorDrawable, caches, theme, canApplyTheme, key, dr);
+                    ...
+                }
+            }
+
+            return dr;
+        } catch (Exception e) { ... }
+    }
+
+private Drawable loadDrawableForCookie(@NonNull Resources wrapper, @NonNull TypedValue value, int id, int density) {
+        ...
+        final Drawable dr;
+        ...
+            try {
+                if (file.endsWith(".xml")) { //xml读取
+                    if (file.startsWith("res/color/")) {
+                        dr = loadColorOrXmlDrawable(wrapper, value, id, density, file);
+                    } else {
+                        dr = loadXmlDrawable(wrapper, value, id, density, file);
+                    }
+                } else { //图片读取
+                    //AssetManager#openNonAsset()是native方法，读取图片文件流
+                    final InputStream is = mAssets.openNonAsset(value.assetCookie, file, AssetManager.ACCESS_STREAMING);
+                    AssetInputStream ais = (AssetInputStream) is;
+                    //将InputStream转成Drawable
+                    dr = decodeImageDrawable(ais, wrapper, value);
+                }
+            } finally {
+                stack.pop();
+            }
+        ...
+        return dr;
+    }
+
+private Drawable decodeImageDrawable(@NonNull AssetInputStream ais, @NonNull Resources wrapper, @NonNull TypedValue value) {
+        ImageDecoder.Source src = new ImageDecoder.AssetInputStreamSource(ais, wrapper, value);
+        try {
+            return ImageDecoder.decodeDrawable(src, (decoder, info, s) -> {
+                decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE);
+            });
+        } catch (IOException ioe) { ... }
+    }
+
+
+public static Drawable decodeDrawable(@NonNull Source src, @Nullable OnHeaderDecodedListener listener) throws IOException {
+        Bitmap bitmap = decodeBitmap(src, listener);
+        return new BitmapDrawable(src.getResources(), bitmap);
+    }
+
+
+public static Bitmap decodeBitmap(@NonNull Source src, @Nullable OnHeaderDecodedListener listener) throws IOException {
+        TypedValue value = new TypedValue();
+        value.density = src.getDensity();
+        ImageDecoder decoder = src.createImageDecoder();
+        if (listener != null) {
+            listener.onHeaderDecoded(decoder, new ImageInfo(decoder), src);
+        }
+        return BitmapFactory.decodeResourceStream(src.getResources(), value,
+                ((InputStreamSource) src).mInputStream, decoder.mOutPaddingRect, null);
+    }
+
+
+public static Bitmap decodeResourceStream(@Nullable Resources res, @Nullable TypedValue value, @Nullable InputStream is, @Nullable Rect pad, @Nullable Options opts) {
+        validate(opts);
+        if (opts == null) { opts = new Options(); }
+
+        //设置屏幕密度，也就是说Drawable会根据屏幕密度来加载图片，所以资源图片放错位置，或者太大也是会导致OOM的
+        if (opts.inDensity == 0 && value != null) {
+            final int density = value.density;
+            if (density == TypedValue.DENSITY_DEFAULT) {
+                opts.inDensity = DisplayMetrics.DENSITY_DEFAULT;
+            } else if (density != TypedValue.DENSITY_NONE) {
+                opts.inDensity = density;
+            }
+        }
+        
+        if (opts.inTargetDensity == 0 && res != null) {
+            opts.inTargetDensity = res.getDisplayMetrics().densityDpi;
+        }
+        
+        return decodeStream(is, pad, opts);
+    }
+
+
+//Drawable的绘制：
+View#setBackground（给全局变量mBackground赋值）
+View#draw -> View#drawBackground -> Drawable#draw（BitmapDrawable重写了draw）-> 调用了canvas.drawBitmap绘制背景
+```
+
+
+
+##### 说说drawable跟屏幕密度的关系
+
+```java
+各个不同的文件夹对应的具体密度是多少？
+0			nodpi
+0-120 		ldpi
+120-160		mdpi（48x48）
+160-240		hdpi（72x72）
+240-320		xhdpi（96x96）
+320-480		xxhdpi（144x144）
+480-640		xxxhdpi（192x192）
+图片在低dpi的目录，那图片会被认为是为低密度设备需要的，现在要显示在高密度设备上，图片会进行放大。
+图片在高dpi的目录，那图片会被认为是为高密度设备需要的，现在要显示在低密度设备上，图片会进行缩放。
+图片在nodpi目录，则无论设备dpi为多少，保留原图片大小，不进行缩放
+
+
+各个文件夹该放置多大分辨率的图片？
+scale = 设备dpi / 图片所在drawable目录对应的最大dpi
+
+假设当前的设备密度是480dpi, 72x72的图分别放在 xxhdpi 和 xhdp ，两种情况下图片各占多少内存？（假设现在是RGB565格式（2个字节））
+xxhdpi:（72 * 72 * 2）*（480/480）= 10368字节
+xhdpi:（72 * 72 * 2）*（480/320）= 15552字节
+如果在开发时不恰当的将高分辨的图片放在低密度的文件夹里，很可能在高密度的设备上显示的时候会OOM，因为它们会进行放大！！
+
+  
+drawable文件夹的匹配规则
+1.根据设备的密度，找到屏幕密度匹配的drawable文件夹，在里边找
+2.屏幕密度匹配的drawable文件夹没找到，先更高密度的drawable中找，如果没找到再去更高密度drawable中找
+3.如果高密度的drawable都没有，就去nodpi里边找
+4.如果nodpi也没有，就去低密度drawable中找
+5.如果所有drawable都找不到，就报错
+```
+
+
+
+
+
+#### Bitmap
+
+##### 说说Bitmap变迁与原理解析
+
+参考：https://www.jianshu.com/p/d5714e8987f3
+
+```java
+android2.1之前 - Bitmap的像素存储在Native上分配（生命周期不可控，需要用户自己释放）
+
+android8.0之前 - Bitmap的像素存储：Dalvik的Java堆上
+public final class Bitmap implements Parcelable {
+    ...
+    private byte[] mBuffer; //数据存储在Java堆中，Native层解析完数据后创建一个Java层的byte[]并返回
+    ...
+}
+
+android8.0之后 - Bitmap的像素存储：又回到Native上分配，并且无需用户主动释放
+public final class Bitmap implements Parcelable {
+    ...
+    private final long mNativePtr; //Java层只持有了Native层Bitmap对象地址，数据在Native层解析完之后通过calloc开辟内存直接存放
+    ...
+ }
+
+Dalvik的Java堆上分配像素内存：
+虚拟机内存是受限的，由系统配置dalvik.vm.heapgrowthlimit决定。
+如果启用largeheap开关，虚拟机内存也只能增大到dalvik.vm.heapsize的大小。
+dalvik.vm.heapgrowthlimit=192m
+dalvik.vm.heapsize=512m
+
+缺点：容易OOM
+一旦Bitmap的内存占用达到虚拟机内存上限的时候，在虚拟机就会抛出OOM异常。
+
+优点：OOM容易捕获
+由于是在Java虚拟机抛出的异常，非常容易被捕获。
+
+
+Native上分配像素内存：
+Bitmap内存占用的无限增长，不受虚拟机内存限制。
+直到App无法再从系统分配到内存，才会崩溃。
+
+缺点：Native内存OOM难以捕获
+Bitmap内存无限增长的情况下也会导致APP崩溃。但是这种崩溃已经不是OOM崩溃了，Java虚拟机也不会捕获。按道理说，应该属于linux的OOM了。
+（这个时候崩溃并不为Java虚拟机控制，直接进程死掉，不会有Crash弹框）
+
+优点：
+不容易OOM；
+降低Java虚拟机内存压力（降低虚拟机内存出现OOM）；
+辅助回收Native内存（NativeAllocationRegistry）。
+NativeAllocationRegistry是一种辅助自动回收native内存的一种机制，当Java对象被GC后，NativeAllocationRegistry可以辅助回收Java对象所申请的Native内存
+```
+
+
+
+##### 说说说Bitmap占用的内存是怎么释放的？
+
+```java
+释放的方式有两种，一种是主动释放，另外一种是系统帮我们释放。
+//主动回收：recycle()
+8.0之前：在Java层直接置空像素数据（byte[]）
+8.0之后：调用native方法，在native层直接释放像素数据
+recycle()只会给我们清除掉像素数据，但是Bitmap对象（Java层 以及 Native层）还是交由GC帮忙回收。
+官方建议：平常开发中无需调用recycle()来释放内存，GC会帮我们释放的。
+
+//系统帮我们释放：7.0前（BitmapFinalizer）、7.0后（NativeAllocationRegistry）
+注意：在查阅了源码之后发现7.0之后就用了NativeAllocationRegistry，7.0之前才是用户BitmapFinalizer。并不是网上说的8.0（llk）
+
+7.0之前：Java层Bitmap对象、像素数据依靠GC释放；Native层Bitmap对象依靠Object#finalize析构方法释放。
+	像素数据存放在Java层，所有Java层Bitmap对象被GC释放了，像素数据自然也会被释放了。
+
+	下面看看Native层Bitmap对象的释放：
+    Bitmap(...) {
+        ...
+        mNativePtr = nativeBitmap;
+        mFinalizer = new BitmapFinalizer(nativeBitmap);
+        int nativeAllocationByteCount = (buffer == null ? getByteCount() : 0);
+        mFinalizer.setNativeAllocationByteCount(nativeAllocationByteCount);
+    }
+
+    private static class BitmapFinalizer {
+        private long mNativeBitmap;
+        private int mNativeAllocationByteCount;
+
+        BitmapFinalizer(long nativeBitmap) {
+            mNativeBitmap = nativeBitmap;
+        }
+
+        public void setNativeAllocationByteCount(int nativeByteCount) {
+            if (mNativeAllocationByteCount != 0) {
+                VMRuntime.getRuntime().registerNativeFree(mNativeAllocationByteCount);
+            }
+            mNativeAllocationByteCount = nativeByteCount;
+            if (mNativeAllocationByteCount != 0) {
+                VMRuntime.getRuntime().registerNativeAllocation(mNativeAllocationByteCount);
+            }
+        }
+
+        @Override
+        public void finalize() {
+            try {
+                super.finalize();
+            } catch (Throwable t) {
+                // Ignore
+            } finally {
+                // finalize 这里是 GC 回收该对象时会调用
+                setNativeAllocationByteCount(0);
+                nativeDestructor(mNativeBitmap);
+                mNativeBitmap = 0;
+            }
+        }
+    }
+
+    private static native void nativeDestructor(long nativeBitmap);
+
+FinalizerDaemon：析构守护线程。
+对于重写了finalize方法的对象，它们在被GC回收时并不会马上被回收。
+而是被放入到一个队列中，等待FinalizerDaemon守护线程去调用它们的成员函数finalize然后再被回收。
+（如果对象实现了finalize函数，不仅会使其生命周期至少延长一个GC过程，而且也会延长其所引用到的对象的生命周期，从而给内存造成了不必要的压力）
+
+为什么Bitmap对象不直接实现finalize()方法呢？
+因为8.0之前像素数据是存储在Java对象中的，如果直接实现finalize()方法会导致bitmap对象被延时回收，造成内存压力。
+所以才会让BitmapFinalizer来实现finalize()方法，当Bitmap对象变成GCroot不可达时，会触发回收BitmapFinalizer放到延时回收队列中，调用它的finalize。
+
+
+7.0之后：NativeAllocationRegistry（https://juejin.cn/post/6894153239907237902）
+NativeAllocationRegistry总结：
+1. 当Native内存增长过多的时候自动触发GC（告诉GCNative申请的内存长度，检查是否到达GC阀值）
+2. 当GC回收Java对象时同时回收Native占用的内存（Cleaner）
+
+Bitmap(...) {
+    ...
+    mNativePtr = nativeBitmap; //Native层Bitmap对象地址
+    long nativeSize = NATIVE_ALLOCATION_SIZE + getAllocationByteCount(); //step1
+    NativeAllocationRegistry registry = new NativeAllocationRegistry(Bitmap.class.getClassLoader(), nativeGetNativeFinalizer(), nativeSize); //step2
+    registry.registerNativeAllocation(this, nativeBitmap); //step3
+    ...
+}
+
+step1. 获取Native层需要的内存大小 
+long nativeSize = NATIVE_ALLOCATION_SIZE + getAllocationByteCount();
+
+//NATIVE_ALLOCATION_SIZE + getAllocationByteCount()
+//固定的32字节 + getAllocationByteCount()
+private static final long NATIVE_ALLOCATION_SIZE = 32;
+public final int getAllocationByteCount() {
+    ...
+    //Native方法，返回Native层Bitmap对象所占用的字节数
+    return nativeGetAllocationByteCount(mNativePtr);
+}
+
+
+step2. 创建NativeAllocationRegistry对象
+//NativeAllocationRegistry registry = new NativeAllocationRegistry(Bitmap.class.getClassLoader(), nativeGetNativeFinalizer(), nativeSize);
+
+public NativeAllocationRegistry(ClassLoader classLoader, long freeFunction, long size) {
+        ...
+        this.classLoader = classLoader;
+        this.freeFunction = freeFunction;
+        this.size = size;
+}
+
+//classLoader：这个参数并没有使用，不知道传进来是干啥用的
+//freeFunction：释放Native层Bitmap对象以及其内存的函数地址 nativeGetNativeFinalizer()
+//nativeSize：Native层需要的内存大小
+
+//Bitmap.java
+private static native long nativeGetNativeFinalizer();
+//Bitmap.cpp
+{"nativeGetNativeFinalizer", "()J", (void*)Bitmap_getNativeFinalizer },
+
+//将函数转成内存地址返回
+static jlong Bitmap_getNativeFinalizer(JNIEnv*, jobject) { return static_cast<jlong>(reinterpret_cast<uintptr_t>(&Bitmap_destruct)); }
+
+//释放Bitmap对象函数
+static void Bitmap_destruct(BitmapWrapper* bitmap) { delete bitmap;}
+
+
+step3. 登记目标对象，实现内存的自动回收
+registry.registerNativeAllocation(this, nativeBitmap);
+
+    public Runnable registerNativeAllocation(Object referent, long nativePtr) {
+        ...
+        CleanerThunk thunk; //这个就是执行释放函数的Runnable，给Cleaner内部用的
+        CleanerRunner result; //这个Runnable是提供给外部用的，方便外部调Cleaner#clean
+        try {
+            thunk = new CleanerThunk();
+            //利用Cleaner机制来回收（使用虚引用得知对象被GC的时机，在GC前执行额外的回收工作）
+            Cleaner cleaner = Cleaner.create(referent, thunk);
+            result = new CleanerRunner(cleaner);
+            registerNativeAllocation(this.size); //告诉GC本次Native层申请了多少内存
+        } catch (VirtualMachineError vme /* probably OutOfMemoryError */) {
+            applyFreeFunction(freeFunction, nativePtr); //如果发生异常，直接调用释放函数
+            throw vme;
+        }
+        thunk.setNativePtr(nativePtr);
+        return result;
+    }
+
+    private class CleanerThunk implements Runnable {
+        private long nativePtr;
+
+        public CleanerThunk() {
+            this.nativePtr = 0;
+        }
+
+        public void run() {
+            if (nativePtr != 0) {
+                applyFreeFunction(freeFunction, nativePtr);
+                registerNativeFree(size); //告诉GC本次Native申请的内存已经被释放
+            }
+        }
+
+        public void setNativePtr(long nativePtr) {
+            this.nativePtr = nativePtr;
+        }
+    }
+
+    private static class CleanerRunner implements Runnable {
+        private final Cleaner cleaner;
+
+        public CleanerRunner(Cleaner cleaner) {
+            this.cleaner = cleaner;
+        }
+
+        public void run() {
+            cleaner.clean();
+        }
+    }
+
+    //告诉GC本次Native申请的内存大小。检测下是否达到GC的触发条件。
+    private static void registerNativeAllocation(long size) {
+        VMRuntime.getRuntime().registerNativeAllocation((int)Math.min(size, Integer.MAX_VALUE));
+    }
+
+    //告诉GC本次Native申请的内存已经被释放
+    private static void registerNativeFree(long size) {
+        VMRuntime.getRuntime().registerNativeFree((int)Math.min(size, Integer.MAX_VALUE));
+    }
+
+    public static native void applyFreeFunction(long freeFunction, long nativePtr);
+
+    //libcore_util_NativeAllocationRegistry.cpp
+    static void NativeAllocationRegistry_applyFreeFunction(JNIEnv*, jclass, jlong freeFunction, jlong ptr) {
+        //将内存地址强转为对象指针
+        void* nativePtr = reinterpret_cast<void*>(static_cast<uintptr_t>(ptr));
+        //将Bitmap_destruct函数地址强转为函数对象
+        FreeFunction nativeFreeFunction
+            = reinterpret_cast<FreeFunction>(static_cast<uintptr_t>(freeFunction));
+        //调用该对象的Bitmap_destruct函数
+        nativeFreeFunction(nativePtr);
+    }
+
+Cleaner：利用虚引用和ReferenceQueue实现对一个对象生命周期的监（https://juejin.cn/post/6891918738846105614#heading-7）
+
+Cleaner继承自PhantomReference<Object>。
+在构建Cleaner的时候需要传入一个强引用对象以及一个Runnable。
+强引用对象就是监听的目标，Runnable就是用来执行具体逻辑。
+
+当对象被GC后，PhantomReference就会加入到ReferenceQueue中，并且唤醒ReferenceQueueDaemon线程。
+ReferenceQueueDaemon线程就会去遍历执行ReferenceQueue中的PhantomReference。如果是Cleaner，
+就会执行其clean()方法（因此要保证Cleaner#clean方法中做的事情是快速的，防止阻塞其他Cleaner的清理动作）。
+
+Cleaner#clean方法内就会执行Runnable#run，最终执行我们的释放逻辑。
+```
+
+
+
+
 
 
 
