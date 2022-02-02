@@ -1450,6 +1450,174 @@ Choreographer有监听Vsync信号，一旦收到信号就会执行doFrame方法�
 
 ##### 说说对RecycleView的了解。
 
+#####  说说RecyclerView的回收复⽤机制
+
+```java
+回收复用的目标对象为ViewHolder
+  
+三级缓存 或 四级缓存
+0、mChangedScrap & mAttachedScrap
+mAttachedScrap：存放可见范围内的ViewHolder。（如果position或者id对应的上，无需重新绑定数据）
+在onLayoutChildren时会先把当前可见的ViewHolder都移除掉，再重新添加进去。这些可见的ViewHolder就是临时缓存在mAttachedScrap的。
+作用：在布局过程中，减少绑定数据次数
+
+mChangedScrap：存放可见范围内且数据发生了变化的ViewHolder。（复用需重新绑定数据）
+notifyItemChanged等方法调用之后，将发生变化的ViewHolder缓存到mChangedScrap。
+
+
+1、mCachedViews：存放remove掉的ViewHolder。（如果position或者id对应的上，无需重新绑定数据）//默认值大小是2
+我的理解：在用户重复短距离上下滑的场景，让RecyclerView进行快速回收与复用，提高性能。
+作用：减少绑定数据次数
+
+2、mViewCacheExtension (提供给用户自定义的)
+3、RecycledViewPool：存放remove掉并且重置了数据的ViewHolder。（复用需重新绑定数据） //默认值大小是5
+作用：减少ViewHolder的创建
+  
+从触摸事件分析回收复用原理：
+RecyclerView#onTouchEvent（ACTION_MOVE）-> RecyclerView#scrollByInternal -> LayoutManager#scrollVerticallyBy（以垂直滑动为例）-> LinearLayoutManager#scrollVerticallyBy -> LinearLayoutManager#scrollBy -> LinearLayoutManager#fill  
+
+int fill(RecyclerView.Recycler recycler, LayoutState layoutState, RecyclerView.State state, boolean stopOnFocusable) {
+		...
+        //判断当前是否为滚动状态，如果是则触发回收
+        if (layoutState.mScrollingOffset != LayoutState.SCROLLING_OFFSET_NaN) {
+            ...
+            recycleByLayoutState(recycler, layoutState); //回收
+        }
+        ...
+        while ((layoutState.mInfinite || remainingSpace > 0) && layoutState.hasMore(state)) {
+            ...
+            layoutChunk(recycler, state, layoutState, layoutChunkResult); //复用
+            ...
+            if (layoutState.mScrollingOffset != LayoutState.SCROLLING_OFFSET_NaN) {
+                ...
+                recycleByLayoutState(recycler, layoutState); //回收
+            }
+            ...
+        }
+        ...
+    }
+
+复用原理：
+LinearLayoutManager#layoutChunk -> LinearLayoutManager.LayoutState#next -> RecyclerView.Recycler#getViewForPosition -> RecyclerView.Recycler#tryGetViewHolderForPositionByDeadline
+
+    void layoutChunk(RecyclerView.Recycler recycler, RecyclerView.State state, LayoutState layoutState, LayoutChunkResult result) {
+        View view = layoutState.next(recycler);
+        ...
+        RecyclerView.LayoutParams params = (RecyclerView.LayoutParams) view.getLayoutParams();
+        //addView方法、addDisappearingView方法最终都是走addViewInt方法，将View添加到RecyclerView
+        //addViewInt -> ChildHelper#addView -> 将View添加到RecyclerView，并且调用dispatchChildAttached
+        //dispatchChildAttached处理 Adapter#onViewAttachedToWindow、onChildViewAttachedToWindow回调
+        if (layoutState.mScrapList == null) {
+            if (mShouldReverseLayout == (layoutState.mLayoutDirection == LayoutState.LAYOUT_START)) {
+                addView(view);
+            } else {
+                addView(view, 0);
+            }
+        } else {
+            if (mShouldReverseLayout == (layoutState.mLayoutDirection == LayoutState.LAYOUT_START)) {
+                addDisappearingView(view);
+            } else {
+                addDisappearingView(view, 0);
+            }
+        }
+        ...
+    }
+
+    ViewHolder tryGetViewHolderForPositionByDeadline(int position, boolean dryRun, long deadlineNs) {
+            ...
+            boolean fromScrapOrHiddenOrCache = false;
+            ViewHolder holder = null;
+            // 0) 我们调用notifyItemChanged方法时，先从mChangedScrap里找
+            if (mState.isPreLayout()) {
+                holder = getChangedScrapViewForPosition(position); //从mChangedScrap获取holder
+                ...
+            }
+            // 1) 通过 position 在 mAttachedScrap / mHiddenViews / mCachedViews 中获取hodler
+            if (holder == null) {
+                holder = getScrapOrHiddenOrCachedHolderForPosition(position, dryRun);
+                ...
+            }
+            if (holder == null) {
+                ...
+                final int type = mAdapter.getItemViewType(offsetPosition);
+                // 2) 通过id在 mAttachedScrap / mCachedViews 中获取holder
+                if (mAdapter.hasStableIds()) {
+                    holder = getScrapOrCachedViewForId(mAdapter.getItemId(offsetPosition), type, dryRun);
+                    ...
+                }
+                //尝试从mViewCacheExtension（自定义缓存）里边找
+                if (holder == null && mViewCacheExtension != null) {
+                    final View view = mViewCacheExtension.getViewForPositionAndType(this, position, type);
+                    if (view != null) {
+                        holder = getChildViewHolder(view);
+                        ...
+                    }
+                }
+                if (holder == null) { //根据item type从RecycledViewPool获取holder
+                    holder = getRecycledViewPool().getRecycledView(type);
+                    ...
+                }
+                if (holder == null) { //最终通过createViewHolder来创建一个holder
+                    ...
+                    holder = mAdapter.createViewHolder(RecyclerView.this, type);
+                    ...
+                }
+            }
+            ...
+            return holder;
+        }
+
+回收原理：
+LinearLayoutManager#recycleByLayoutState -> recycleViewsFromEnd 或 recycleViewsFromStart -> recycleChildren -> RecyclerView.LayoutManager#removeAndRecycleViewAt -> RecyclerView.Recycler#recycleView -> RecyclerView.Recycler#recycleViewHolderInternal
+
+	public void removeAndRecycleViewAt(int index, @NonNull Recycler recycler) {
+        final View view = getChildAt(index);
+        removeViewAt(index); //移除View
+        recycler.recycleView(view); //进行回收
+    }
+
+	public void recycleView(@NonNull View view) {
+        ViewHolder holder = getChildViewHolderInt(view); //获取ViewHolder
+        if (holder.isTmpDetached()) {
+        	//调用Adapter#onViewDetachedFromWindow
+        	//如果有注册ChildAttachStateChangeListener，则回调这些监听者onChildViewDetachedFromWindow
+            removeDetachedView(view, false);
+        }
+        ...
+        recycleViewHolderInternal(holder); //回收ViewHolder逻辑
+        ...
+    }
+
+    void recycleViewHolderInternal(ViewHolder holder) {
+            ...
+            boolean cached = false;
+            if (forceRecycle || holder.isRecyclable()) {
+                if (mViewCacheMax > 0 && !holder.hasAnyOfTheFlags(ViewHolder.FLAG_INVALID | ViewHolder.FLAG_REMOVED | ViewHolder.FLAG_UPDATE | ViewHolder.FLAG_ADAPTER_POSITION_UNKNOWN)) {
+                    //判断是否满足放进mCachedViews
+                    int cachedViewSize = mCachedViews.size();
+                    //判断mCachedViews是否已满
+                    if (cachedViewSize >= mViewCacheMax && cachedViewSize > 0) {
+                        //如果满了就将下标为0（即最早加入的）移除，同时将其加入到 RecyclerPool 中
+                        recycleCachedViewAt(0);
+                        cachedViewSize--;
+                    }
+
+                    ...
+                    mCachedViews.add(targetCacheIndex, holder); //将ViewHolder加入mCachedViews
+                    cached = true;
+                }
+                //如果没有满足上面的条件，则直接存进RecyclerPool中
+                if (!cached) {
+                    addViewHolderToRecycledViewPool(holder, true);
+                    recycled = true;
+                }
+            }
+            ...
+        }
+```
+
+
+
 
 
 #### 事件分发
@@ -1670,7 +1838,6 @@ xxhdpi:（72 * 72 * 2）*（480/480）= 10368字节
 xhdpi:（72 * 72 * 2）*（480/320）= 15552字节
 如果在开发时不恰当的将高分辨的图片放在低密度的文件夹里，很可能在高密度的设备上显示的时候会OOM，因为它们会进行放大！！
 
-  
 drawable文件夹的匹配规则
 1.根据设备的密度，找到屏幕密度匹配的drawable文件夹，在里边找
 2.屏幕密度匹配的drawable文件夹没找到，先更高密度的drawable中找，如果没找到再去更高密度drawable中找
@@ -1732,6 +1899,79 @@ Bitmap内存无限增长的情况下也会导致APP崩溃。但是这种崩溃�
 降低Java虚拟机内存压力（降低虚拟机内存出现OOM）；
 辅助回收Native内存（NativeAllocationRegistry）。
 NativeAllocationRegistry是一种辅助自动回收native内存的一种机制，当Java对象被GC后，NativeAllocationRegistry可以辅助回收Java对象所申请的Native内存
+  
+  
+  
+Bitmap#createBitmap -> Bitmap#nativeCreate -> Bitmap.cpp#Bitmap_creator
+
+===================== 8.0之前 ====================
+static jobject Bitmap_creator(...) {
+    ...
+    Bitmap* nativeBitmap = GraphicsJNI::allocateJavaPixelRef(env, &bitmap, NULL);
+    ...
+    if (jColors != NULL) {
+        GraphicsJNI::SetPixels(env, jColors, offset, stride, 0, 0, width, height, bitmap);
+    }
+    return GraphicsJNI::createBitmap(env, nativeBitmap, getPremulBitmapCreateFlags(isMutable));
+}
+
+//Graphics.cpp
+android::Bitmap* GraphicsJNI::allocateJavaPixelRef(JNIEnv* env, SkBitmap* bitmap, SkColorTable* ctable) {
+    ...
+    //创建一个Java的Byte数组
+    jbyteArray arrayObj = (jbyteArray) env->CallObjectMethod(gVMRuntime, gVMRuntime_newNonMovableArray, gByte_class, size);
+    ...
+    jbyte* addr = (jbyte*) env->CallLongMethod(gVMRuntime, gVMRuntime_addressOf, arrayObj);
+    ...
+    //Byte数组放到Native层的Bitmap对象
+    android::Bitmap* wrapper = new android::Bitmap(env, arrayObj, (void*) addr, info, rowBytes, ctable);
+    ...
+    return wrapper;
+}
+
+//Graphics.cpp
+jobject GraphicsJNI::createBitmap(JNIEnv* env, android::Bitmap* bitmap, int bitmapCreateFlags, jbyteArray ninePatchChunk, jobject ninePatchInsets, int density) {
+	...
+	//创建一个Java的Bitmap对象，通过其构造函数，将Byte数组赋值给它
+    jobject obj = env->NewObject(gBitmap_class, gBitmap_constructorMethodID,
+            reinterpret_cast<jlong>(bitmap), bitmap->javaByteArray(),
+            bitmap->width(), bitmap->height(), density, isMutable, isPremultiplied,
+            ninePatchChunk, ninePatchInsets);
+    ...
+    return obj; //返回这个Bitmap对象给Java层
+}
+
+
+===================== 8.0之后 ====================
+static jobject Bitmap_creator(...) {
+    ...
+    sk_sp<Bitmap> nativeBitmap = Bitmap::allocateHeapBitmap(&bitmap);
+    ...
+    if (jColors != NULL) {
+        GraphicsJNI::SetPixels(env, jColors, offset, stride, 0, 0, width, height, bitmap);
+    }
+    return createBitmap(env, nativeBitmap.release(), getPremulBitmapCreateFlags(isMutable));
+}
+
+//(hwui包下)Bitmap.cpp
+static sk_sp<Bitmap> allocateHeapBitmap(size_t size, const SkImageInfo& info, size_t rowBytes) {
+    void* addr = calloc(size, 1); //在native堆内存中申请内存空间
+    if (!addr) {
+        return nullptr;
+    }
+    return sk_sp<Bitmap>(new Bitmap(addr, size, info, rowBytes));
+}
+
+jobject createBitmap(JNIEnv* env, Bitmap* bitmap, int bitmapCreateFlags, jbyteArray ninePatchChunk, jobject ninePatchInsets, int density) {
+    ...
+    BitmapWrapper* bitmapWrapper = new BitmapWrapper(bitmap);
+    //创建一个Java的Bitmap对象，通过其构造函数，将Native层Bitmap对象地址赋值给它
+    jobject obj = env->NewObject(gBitmap_class, gBitmap_constructorMethodID,
+            reinterpret_cast<jlong>(bitmapWrapper), bitmap->width(), bitmap->height(), density,
+            isMutable, isPremultiplied, ninePatchChunk, ninePatchInsets);
+    ...
+    return obj; //返回这个Bitmap对象给Java层
+}
 ```
 
 
@@ -1949,7 +2189,219 @@ Cleaner#clean方法内就会执行Runnable#run，最终执行我们的释放逻�
 
 
 
+##### 如何进行图⽚压缩？+2
 
+```java
+色深："色彩的深度"，表示一个像素点用多少bit来存储色值。（数字图像参数）
+位深：跟硬件相关的对象一律使用“位深”来描述（物理硬件参数）
+例如：某张图片100*100 色深32位(ARGB_8888)，保存时位深度为24位
+加载到内存中占大小：100 * 100 * (32 / 8)
+存储到文件中占大小：100 * 100 * (24 / 8) * 压缩率
+
+压缩方法有两种：1、质量压缩；2、尺寸压缩。
+质量压缩：保持图片宽高以及占用内存不变的情况下，改变Bitmap的质量。（https://cloud.tencent.com/developer/article/1006307）
+ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+//format：压缩格式，JPEG（有损）、PNG（无损，quality参数会不起作用）、WEBP（有损或无损，有损比JPEG更加省空间）
+//quality：为0～100，0表示最小体积，100表示最高质量
+bitmap.compress(Bitmap.CompressFormat.JPEG, quality, outputStream);
+
+实现原理：
+Java层函数 -> Native函数 -> Skia函数 -> 对应第三库函数（例如libjpeg）
+（Skia在Android中提供了基本的画图和简单的编解码功能。可以挂接其他的第三方编码解码库或者硬件编解码库，例如libpng、libjpeg、libgif 等。bitmap.compress(Bitmap.CompressFormat.JPEG...)，实际会调用libjpeg.so动态库进行编码压缩）
+
+
+哈夫曼算法：
+文件中可能会出现五个值a,b,c,d,e，其二进制为
+a. 1010
+b. 1011
+c. 1100
+d. 1101
+e. 1110
+定长算法下最优（最前面的一位数字是 1，其实是浪费掉了）
+a. 010
+b. 011
+c. 100
+d. 101
+e. 110
+
+哈夫曼算法对定长算法进行了改进。给信息赋予权重，即为信息加权。
+假设 a 占据了 60%，b 占据了 20%， c 占据了 20%，d,e 都是 0%
+a:010  (60%)
+b:011  (20%)
+c:100  (20%)
+d:101  (0%)
+e:110  (0%)
+在这种情况下，我们可以使用哈夫曼树算法再次优化为：
+a:1
+b:01
+c:00
+就是出现频率高的字母使用短码，对出现频率低的使用长码，不出现的直接就去掉。最后abcde的哈夫曼编码就对应：1 01 00
+
+所以这个算法一个很重要的思路是必须知道每一个元素出现的权重，能够知道每一个元素的权重那么就能够根据权重动态生成一个最优的哈夫曼表。
+怎么去获取每一个元素，对于图片就是每一个像素中argb的权重。只能去循环整个图片的像素信息，这无疑是非常消耗性能的。
+
+Android在使用libjpeg，压缩默认使用的是 默认哈夫曼表，而不是 图像数据计算哈弗曼表。
+//标志位
+optimize_coding=FALSE //使用默认哈夫曼表
+optimize_coding=TRUE  //使用图像数据计算哈弗曼表（比默认哈夫曼表体积缩小2倍）
+Google在初期考虑到手机的性能瓶颈，计算图片权重这个阶段非常占用CPU资源的同时也非常耗时，因为此时需要计算图片所有像素 argb 的权重，这也是 Android 的图片压缩率对比 iOS 来说差了一些的原因之一。
+
+从Android7.0 版本开始，optimize_code标示已经设置为了TRUE，也就是默认使用图像生成哈夫曼表。
+
+
+
+尺寸压缩：改变Bitmap的宽高以及占用内存（https://cloud.tencent.com/developer/article/1006352?from=article.detail.1006307）
+也叫重采样，放大图像称为上采样（upsamping），缩小图像称为下采样（downsampling）。主要讨论缩小图像。
+Android中图片重采样提供了两种方法，一种是邻近采样（Nearest Neighbour Resampling），另一种是双线性采样（Bilinear Resampling）
+
+邻近采样：inSampleSize（inDensity搭配inTargetDensity使用，效果跟inSampleSize是一样的）
+BitmapFactory.Options options = new BitmapFactory.Options();
+//设置取样大小。它的作用是：设置int类型后，假如设为4。则宽和高都为原来的1/4，宽高都减少了自然内存也降低了。（google推荐用2的倍数）
+options.inSampleSize = 2; 
+Bitmap compress = BitmapFactory.decodeFile("xxx.png", options);
+
+邻近采样采用邻近点插值算法
+邻近采样比较粗暴，采样率设置为2。那么就是两个像素选一个留下，另一个直接抛弃。
+例如：每个像素红绿相间的图片。邻近采样为2的时候，图片直接变成绿色了。
+
+
+双线性采样：Matrix
+//方式一
+Bitmap bitmap = BitmapFactory.decodeFile("xxx.png");
+//双线性采样使用的是双线性內插值算法，参考源像素相应位置周围2x2个点的值，根据相对位置取对应的权重，经过计算之后得到目标图像。
+//双线性内插值算法在图像的缩放处理中具有抗锯齿功能, 是最简单和常见的图像缩放算法.
+Matrix matrix = new Matrix();
+matrix.setScale(0.5f, 0.5f);
+bm = Bitmap.createBitmap(bitmap, 0, 0, bit.getWidth(), bit.getHeight(), matrix, true);
+
+//方式二，最终也是走方式一的
+Bitmap bitmap = BitmapFactory.decodeFile("/sdcard/test.png");
+Bitmap compress = Bitmap.createScaledBitmap(bitmap, bitmap.getWidth()/2, bitmap.getHeight()/2, true);
+
+双线性采样 采用双线性内插值算法
+参考了源像素相应位置周围2x2个点的值，根据相对位置取对应的权重，经过计算之后得到目标图像。
+双线性内插值算法在图像的缩放处理中具有抗锯齿功能，是最简单和常见的图像缩放算法。
+当对相邻2x2个像素点采用双线性內插值算法时，所得表面在邻域处是吻合的，但斜率不吻合，并且双线性内插值算法的平滑作用可能使得图像的细节产生退化，这种现象在上采样时尤其明显。
+
+两个采样算法对比
+邻近采样：最快的，效率最高；产生比较明显的锯齿（尤其是文字内容多的图片）；
+双线性采样：抗锯齿。
+
+
+双立方／双三次采样（Bicubic Resampling）
+采用的是双立方／双三次插值算法
+双立方／双三次插值算法更进一步参考了源像素某点周围4x4个像素。
+Android中并没有原生支持，可以通过ffmpeg来支持，具体的实现在 libswscale/swscale.c 文件中：FFmpeg Scaler Documentation。
+双立方/双三次插值算法经常用于图像或者视频的缩放，它能比双线性内插值算法保留更好的细节质量。
+```
+
+
+
+##### getByteCount() & getAllocationByteCount()的区别？
+
+```java
+在不复用Bitmap时，getByteCount（API12加入）和getAllocationByteCount（API19加入）返回的结果是一样的，都是Bitmap占用的内存大小。
+
+在通过复用Bitmap来解码图片时：
+getByteCount：图片像素占用的大小
+getAllocationByteCount：Bitmap对象占用的大小
+  
+例如：某Bitmap内存占用20。Bitmap对象进行复用，放入一张小图占用了8。
+那么getByteCount为8，getAllocationByteCount为20
+```
+
+
+
+##### 如何计算⼀张图⽚在内存中占⽤的⼤⼩？+2
+
+```java
+1、BitmapFactory#decodeResource（加载资源中的图片）
+w * h * 一像素占的内存 * (设备dpi / 图片所在drawable目录对应的dpi)
+  
+2、BitmapFactory#decodeFile（加载图片文件）
+w * h * 一像素占的内存
+  
+一像素占的内存大小：Bitmap.Config用来描述图片的像素是怎么被存储
+ARGB_8888: 每个像素4字节. 共32位，默认设置。
+Alpha_8: 只保存透明度，共8位，1字节。
+ARGB_4444: 共16位，2字节。
+RGB_565:共16位，2字节，只存储RGB值。
+```
+
+
+
+##### 说说LruCache & DiskLruCache原理 +2
+
+```java
+Lru：淘汰掉最近最少使用的元素。
+LinkedHashMap实现，LinkedHashMap的构造函数里有个布尔参数accessOrder，当它为true时LinkedHashMap会以访问顺序为序排列元素，否则以插入顺序为序排序元素。
+
+LruCache：内存缓存
+int cacheMemorySize = (int)(Runtime.getRuntime().totalMemory() / 1024) / 8;
+LruCache<String, Bitmap> lrucache = new LruCache<String, Bitmap>(cacheMemorySize) {
+
+	//负责计算Bitmap大小。
+    @Override
+    protected int sizeOf(String key, Bitmap value) { 
+        return getBitmapSize(value);
+    }
+
+    //key对应的缓存被删除后就会走这个方法
+    @Override
+    protected void entryRemoved(boolean evicted, String key, Bitmap oldValue, Bitmap newValue) {
+        super.entryRemoved(evicted, key, oldValue, newValue);
+    }
+
+    //获取key对应的缓存时，如果已经被删掉了就会回调这个方法。是否需要再创建新的Bitmap
+    @Override
+    protected Bitmap create(String key) {
+        return super.create(key);
+    }
+};
+
+put(K key, V value)：
+1、插入元素并相应增加当前缓存的容量。如果key已存有数据，将该数据移除并且回调entryRemoved。
+2、如果缓存容量满了，开启循环 从表头删除数据，直到容量小于最大容量为止。被删掉的数据
+
+get(K key)：
+1、如果该数据存在直接返回。根据LinkedHashMap特性，将该数据移动到表尾.
+2、如果取不到key对应的数据，就会调用create()方法，让开发者看需要来创建数据，如果create()有返回就会走类似put的流程。
+
+remove(K key)：移除数据，并且减少对应的容量
+
+
+DiskLruCache：磁盘缓存
+//directory：存储缓存文件的目录；appVersion：应用版本号；valueCount：一个key对应的缓存文件的数目，如果我们传入的参数大于1，那么缓存文件后缀就是.0，.1等；maxSize：缓存容量上限。
+DiskLruCache diskLruCache = DiskLruCache.open(directory, appVersion, valueCount, maxSize);
+
+DiskLruCache.Editor editor = diskLruCache.edit(String.valueOf(System.currentTimeMillis()));
+BufferedOutputStream bufferedOutputStream = new BufferedOutputStream(editor.newOutputStream(0));
+Bitmap bitmap = BitmapFactory.decodeResource(getResources(), R.drawable.scenery);
+bitmap.compress(Bitmap.CompressFormat.JPEG, 100, bufferedOutputStream);
+
+editor.commit();
+diskLruCache.flush();
+diskLruCache.close();
+
+原理：
+//缓存目录中会有一个journal文件，用于记录磁盘缓存的文件描述信息 以及 操作记录
+//map中记录的是文件的描述信息实体Entry，这些Entry与缓存目录中journal文件的记录会一一对应的
+//当map发生变化了，会及时更新journal文件。以确保app下次启动读取回来的Entry是最新的
+private final LinkedHashMap<String, Entry> lruEntries = new LinkedHashMap<String, Entry>(0, 0.75f, true);
+
+DiskLruCache的实现两个部分：日志文件和具体的缓存文件。
+每次对缓存存储的时候除了对缓存文件做相应的操作，还会在日志文件做相应的记录。
+每条日志文件有四种情况：CLEAN（调用了DiskLruCache#edit()保存了缓存，并且调用了Edit#commit）、DIRTY（缓存正在编辑，调用DiskLruCache#edit函数）、REMOVE（缓存写入失败）、READ（读缓存）。
+```
+
+
+
+##### 如何去加载⼤图⽚、长图？
+
+```java
+BitmapRegionDecoder：区域解码器
+https://blog.csdn.net/qq_21258529/article/details/90293388
+```
 
 
 
@@ -2048,6 +2500,50 @@ Cleaner#clean方法内就会执行Runnable#run，最终执行我们的释放逻�
    
 
 ## 性能优化
+
+##### OOM可以被捕获吗？
+
+```java
+可以被捕获。但是不是万不得已最好别捕获它。
+
+  
+Java异常体系中所有异常都继承自Throwable，其中Throwable有两个直接子类Error和Exception。
+Exception 一般指可以/应该捕获和处理的异常。
+Error：一般指非正常状态的。比较严重的，不应该被捕获的系统错误。
+
+如果你把捕获OOM当做处理OOM的一种手段，无疑是不合适的。
+你无法保证你catch的代码就是导致OOM的原因，可能它只是压死骆驼的最后一根稻草，甚至你也无法保证你的catch代码块中不会再次触发OOM。
+
+在你自己明确知道可能发生OOM的情况下设置一个兜底策略，这可能是捕获OOM的唯一意义了。
+例如：View#buildDrawingCacheImpl（为View生成Bitmap缓存，如果OOM了就放弃生成）、NativeAllocationRegistry#registerNativeAllocation（在登记目标对象的时候，如果OOM了直接释放其native内存）
+
+  
+JVM中哪一块内存不会发生OutOfMemoryError？
+Java虚拟机栈：每个方法被执行的时候，Java 虚拟机栈都会同步创建一个栈帧用于存储局部变量表、操作数栈、动态连接、方法出口等信息。每个方法被调用直到执行完毕的过程，就对应着一个栈帧在虚拟机栈中从入栈到出栈的过程。
+如果线程请求的栈深度大于虚拟机所允许的深度，将抛出 StackOverflowError 异常。 如果 Java 虚拟机栈支持动态扩展，当栈扩展时无法申请到足够的内存会排抛出 OutOfMemoryError 异常。
+
+本地方法栈：为虚拟机使用到的 Native 方法服务。《Java 虚拟机规范》对本地方法栈中方法使用的语言、使用方式和数据结构并没有任何强制规定，因此具体的虚拟机可以根据需要自由实现它。Hotspot 将本地方法栈和虚拟机栈合二为一。
+本地方法栈也会在栈深度溢出和栈扩展失败时分别抛出 StackOverflowError 和 OutOfMemoryError 。
+
+Java堆：所有线程共享的一块内存区域，在虚拟机启动时创建。此内存区域的唯一目的就是存放对象实例，Java 世界里 “几乎” 所有的对象实例都在这里分配内存。在 《Java 虚拟机规范》中对 Java 堆的描述是：“所有的对象实例以及数组都应当在堆上分配”。
+
+Java堆以处于物理上不连续的内存空间，但在逻辑上它应该被视为连续的。但对于大对象(典型的如数组对象)，多数虚拟机实现出于实现简单、存储高效的考虑，很可能会要求连续的内存空间。
+
+Java堆既可以被实现成固定大小，也可以是扩展的。如果在 Java 堆中没有内存完成实例分配，并且堆无法再扩展时，Java 虚拟机将会抛出 OutOfMemoryError 。
+
+方法区：方法区是各个线程共享的内存区域，它用于存储已被虚拟机加载的类型信息、常量、静态变量、即时编译器编译后的代码缓存等数据。
+虽然《Java 虚拟机规范》中把方法区描述为堆的一个逻辑部分，但是它却有一个别名叫做“非堆”，目的是与 Java 堆分开来。
+如果方法区无法满足新的内存分配的需求时，将抛出 OutOfMemoryError 。
+
+运行时常量池：方法区的一部分。Class 文件的常量池表，用于存放编译期生成的各种字面量与符号引用，这部分内容将在类加载后方法方法去的运行时常量池。
+运行时常量池具有动态性，运行期间也可以将新的常量放入池中，如 String.intern() 。
+常量池受到方法区的限制，当无法再申请到内存时，会抛出 OutOfMemoryError 。
+
+唯一一个在《Java虚拟机规范》中没有规定任何 OutOfMemoryError 情况的区域是 程序计数器。
+程序计数器：是一块较小的内存空间，它可以看作是当前线程所执行的字节码的行号指示器。如果线程正在执行的是一个Java方法，这个计数器记录的是正在执行的虚拟机字节码指令的地址；如果正在执行的是本地（Native）方法，这个计数器值则应为空（Undefined）。
+```
+
+
 
 1. 内存泄漏是如果产生的？如何解决？+3
 2. 内存泄漏与内存抖动的区别。+3
