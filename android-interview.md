@@ -1464,14 +1464,18 @@ mAttachedScrap：存放可见范围内的ViewHolder。（如果position或者id�
 mChangedScrap：存放可见范围内且数据发生了变化的ViewHolder。（复用需重新绑定数据）
 notifyItemChanged等方法调用之后，将发生变化的ViewHolder缓存到mChangedScrap。
 
-
 1、mCachedViews：存放remove掉的ViewHolder。（如果position或者id对应的上，无需重新绑定数据）//默认值大小是2
 我的理解：在用户重复短距离上下滑的场景，让RecyclerView进行快速回收与复用，提高性能。
 作用：减少绑定数据次数
 
 2、mViewCacheExtension (提供给用户自定义的)
-3、RecycledViewPool：存放remove掉并且重置了数据的ViewHolder。（复用需重新绑定数据） //默认值大小是5
+  
+3、RecycledViewPool：存放remove掉并且重置了数据的ViewHolder。（复用需重新绑定数据）
 作用：减少ViewHolder的创建
+	3.1 当mCachedViews缓存满了以后会根据FIFO（先进先出）的规则把ViewHolder移出并缓存到RecycledViewPool中。
+	3.2 数据结构是SparseArray<ScrapData>，根据itemType将缓存分组，组的数据结构是ScrapData
+	3.3 ScrapData对应的数据结构是ArrayList<ViewHolder>，每个itemType对应的ScrapData的缓存大小默认值是5，可以修改缓存大小
+	3.4 可以提供给多个RecyclerView共享
   
 从触摸事件分析回收复用原理：
 RecyclerView#onTouchEvent（ACTION_MOVE）-> RecyclerView#scrollByInternal -> LayoutManager#scrollVerticallyBy（以垂直滑动为例）-> LinearLayoutManager#scrollVerticallyBy -> LinearLayoutManager#scrollBy -> LinearLayoutManager#fill  
@@ -1614,6 +1618,454 @@ LinearLayoutManager#recycleByLayoutState -> recycleViewsFromEnd 或 recycleViews
             }
             ...
         }
+```
+
+
+
+##### ViewHolder何时被缓存到RecycledViewPool中？
+
+##### 说说CachedView和RecycledViewPool的关系
+
+```java
+在RecycledView滚动的过程中，当item离开屏幕后触发回收机制。
+回收机制会优先把ViewHolder缓存到CachedView中，如果CachedView满了（默认大小2），按照先进先出，会先将最早加入CachedView的ViewHolder移除并且加入到RecycledViewPool中，然后再把回收的ViewHolder加入到CachedView。
+```
+
+
+
+##### 说说CachedView和RecycledViewPool两者区别
+
+```java
+1、数据结构
+CachedView缓存：ArrayList<ViewHolder>  默认大小2
+RecycledViewPool缓存：SparseArray<ScrapData>（key：viewType），ScrapData类（ArrayList<ViewHolder> 默认大小5）
+
+2、缓存优先级
+回收的ViewHolder都是进CachedView缓存的。当CachedView满了，会将CachedView最早的移除并放到到RecycledViewPool，腾出位置给回收的ViewHolder。
+
+3、是否需要重新绑定数据
+CachedView缓存：存放remove掉的ViewHolder。（如果position或者id对应的上，无需重新绑定数据）
+RecycledViewPool缓存：存放remove掉并且重置了数据的ViewHolder。（复用需重新绑定数据）
+```
+
+
+
+##### 如何对RecycleView进⾏局部刷新的？
+
+```java
+方法1：notifyItemChanged(int position, Object payload)
+背景：notifyItemChanged(int position)刷新某个item，出现图片闪一下的现象。
+原因：其刷新是直接让该item重新走一次绑定数据。
+
+notifyItemChanged(int position, Object payload)可以通过payload参数，实现item局部刷新
+在payload传入需要刷新的部位表示。
+然后还需要onBindViewHolder三个参数的方法来配合：onBindViewHolder(VH holder, int position, List<Object> payloads)
+
+    public void onBindViewHolder(final RecyclerView.ViewHolder holder, final int position,List payloads) {
+        if(payloads.isEmpty()){ //走整体刷新逻辑
+           ...
+        }else{ //走局部刷新逻辑
+            int type= (int) payloads.get(0);
+            switch(type){
+                case 0:
+                    userName.setText(mList.get(position).getName());//只刷name
+                    break;
+                case 1:
+                    userId.setText(mList.get(position).getId());//只刷id
+                    break;
+            }    
+        }
+    }
+
+
+方法2：Diffutil
+背景：多个数据变化的情况（可能多个数据的局部变化），需要自己手动比对后才能知道哪些item需要刷新，较为麻烦。
+使用：
+1、实现自己的DiffUtil.Callback
+public class ChatListCallback extends DiffUtil.Callback {
+    private ArrayList<ChatItemBean> old_chats, new_chats;
+
+    public ChatListCallback(ArrayList<ChatItemBean> old_chats, ArrayList<ChatItemBean> new_chats) {
+        this.old_chats = old_chats;
+        this.new_chats = new_chats;
+    }
+
+    @Override
+    public int getOldListSize() { return old_chats.size(); }
+
+    @Override
+    public int getNewListSize() { return new_chats.size(); }
+
+    /**
+     * 判断此id的用户消息是否已存在
+     */
+    @Override
+    public boolean areItemsTheSame(int oldItemPosition, int newItemPosition) {
+        String newId = old_chats.get(oldItemPosition).getUserId();
+        String oldId = new_chats.get(newItemPosition).getUserId();
+        if (oldId == null || newId == null) return false;
+        else if(oldId.trim().equals("") || newId.trim().equals("") || (!oldId.equals(newId))) return false;
+        else return true;
+    }
+
+    /**
+     * 若此id的用户消息已存在，则判断内容是否一致
+     */
+    @Override
+    public boolean areContentsTheSame(int oldItemPosition, int newItemPosition) {
+        String newAvatarPath = new_chats.get(newItemPosition).getAvatarPath();
+        String oldAvatarPath = old_chats.get(oldItemPosition).getAvatarPath();
+
+        String oldNickname = old_chats.get(oldItemPosition).getNickname();
+        String newNickname = new_chats.get(newItemPosition).getNickname();
+
+        if ((newAvatarPath == null && oldAvatarPath != null) || (oldAvatarPath == null && newAvatarPath != null)||( oldAvatarPath != null && !oldAvatarPath.equals(newAvatarPath)) ||
+                        (newNickname == null && oldNickname != null) || (oldNickname == null && newNickname != null)||( oldNickname != null && !oldNickname.equals(newNickname))) return false;
+
+        return true;
+    }
+
+    @Override
+    public Object getChangePayload(int oldItemPosition, int newItemPosition) {
+        String newAvatarPath = new_chats.get(newItemPosition).getAvatarPath();
+        String oldAvatarPath = old_chats.get(oldItemPosition).getAvatarPath();
+
+        String oldNickname = old_chats.get(oldItemPosition).getNickname();
+        String newNickname = new_chats.get(newItemPosition).getNickname();
+
+        Bundle bundle = new Bundle();
+
+        if ((newAvatarPath == null && oldAvatarPath !=null) || (newAvatarPath != null && oldAvatarPath == null) || (oldAvatarPath != null && !oldAvatarPath.equals(newAvatarPath)))
+            bundle.putString("avatarPath", newAvatarPath);
+        if((newNickname == null && oldNickname != null) || (oldNickname == null && newNickname != null)||( oldNickname != null && !oldNickname.equals(newNickname)))
+            bundle.putString("nickname", newNickname);
+
+        if (bundle.size() == 0) return null;
+        return bundle;
+    }
+}
+
+2、通过DiffUtil.calculateDiff方法，比对数据
+//注意：比对数据可能是耗时的，最好放到子线程
+DiffUtil.DiffResult result = DiffUtil.calculateDiff(new ChatListCallback(oldChats, chats));
+//刷新Adapter。注意：如果比对数据放在子线程，这里需切换回主线程
+result.dispatchUpdatesTo(adapter);
+
+3、Adapter需要实现onBindViewHolder(ChatItemViewHolder holder, int position, List<Object> payloads)
+    @Override
+    public void onBindViewHolder(ChatItemViewHolder holder, int position) {
+        ...
+        holder.mTvNickname.setText(chatItemBean.getNickname());
+    }
+
+    @Override
+    public void onBindViewHolder(ChatItemViewHolder holder, int position, List<Object> payloads) {
+        if (payloads.isEmpty())
+            onBindViewHolder(holder, position);
+        else {
+            Bundle bundle = (Bundle) payloads.get(0);
+            for (String key: bundle.keySet()){
+                switch (key){
+                    case "avatarPath":
+                        ...
+                        break;
+                    case "nickname":
+                        holder.mTvNickname.setText((CharSequence) bundle.get(key));
+                        break;
+                }
+            }
+        }
+    }
+```
+
+
+
+##### 你是从哪些方面优化RecyclerView的？
+
+```java
+1、减少item布局的嵌套层级；
+==========================================
+2、减少notifyDataSetChanged刷新全部item，可改为使用单个item刷新 或者 局部刷新方案;
+==========================================
+3、onCreateViewHolder 和 onBindViewHolder 避免创建过多对象以及避减少不必要的操作。
+	1）创建对象可以全局创建一个，例如在创建OnClickListener。
+	2）减少onBindViewHolder中的操作。因为回收复用机制，会经常调到onBindViewHolder重新刷新数据。
+	onBindViewHolder调用次数要比onCreateViewHolder多很多，所有可以将部分操作放到ViewHolder构造函数里边，例如setOnClickListener。
+==========================================
+4、重写onScroll事件，可在滑动停止后再加载。
+对于大量图片的RecyclerView滑动暂停后再加载 或者 可以考虑对滑动速度、滑动状态进行判断，符合加载条件再加载（防止用户快速滑动过程中依旧不断在加载）。
+==========================================
+5、适当增大缓存大小（setItemViewCacheSize(int)）
+RecyclerView可以设置自己所需要的ViewHolder缓存数量，默认大小是2。cacheViews中的缓存只能position相同才可得用，且不会重新bindView，CacheViews满了后移除到RecyclerPool中，并重置ViewHolder，如果对于可能来回滑动的RecyclerView，把CacheViews的缓存数量设置大一些，可以减少bindView的时间，加快布局显示。
+	注：此方法是拿空间换时间，要充分考虑应用内存问题，根据应用实际使用情况设置大小。
+
+	网上大部分设置CacheView大小时都会带上：
+  setDrawingCacheEnabled(true)和setDrawingCacheQuality(View.DRAWING_CACHE_QUALITY_HIGH)
+	setDrawingCacheEnabled这个是View本身的方法，意途是开启缓存。通过setDrawingCacheEnabled把cache打开，再调用getDrawingCache就可以获得view的cache图片，如果cache没有建立，系统会自动调用buildDrawingCache方法来生成cache。一般截图会用到，这里的设置drawingcache，可能是在重绘时不需要重新计算bitmap的宽高等，能加快dispatchDraw的速度，但开启drawingcache，肯定也会耗应用的内存，所以也慎用。
+==========================================
+6、recyclerView.setHasFixedSize(true);
+当Item的高度是固定，设置这属性可以提高性能。尤其是当RecyclerView有插入、删除时性能提升更明显。
+RecyclerView在条目数量改变，会重新测量、布局各个Item，如果设置了这个属性。
+由于Item的宽高都是固定的，Adapter的内容改变时，RecyclerView不会整个布局都重绘。
+具体可用以下伪代码表示：
+void onItemsInsertedOrRemoved() {
+   if (hasFixedSize) layoutChildren();
+   else requestLayout();
+}
+==========================================
+7、RecyclerView 数据预取（https://juejin.cn/post/6844903661382959118）
+android sdk>=21时，支持渲染（Render）线程，RecyclerView数据显示分两个阶段：
+1）在UI线程，处理输入事件、动画、布局、记录绘图操作，每一个条目在进入屏幕显示前都会被创建和绑定view；
+2）渲染（Render）线程把指令送往GPU。
+数据预取的思想就是：将闲置的UI线程利用起来，提前加载计算下一帧的Frame Buffer
+
+如果使用系统提供的LayoutManager默认使用了这种优化。如果使用嵌套RecyclerView或者自定义LayoutManager，则需要在代码中设置。
+1）对于嵌套 RecyclerView，要获取最佳的性能，在内部的 LayoutManager 中调用LinearLayoutManager.setInitialItemPrefetchCount()方法（25.1版本起可用）。
+例如：如果竖直方向的list至少展示三个条目，调用 setInitialItemPrefetchCount(4)。
+2）如果自己实现了LayoutManager，需要重写 LayoutManager.collectAdjacentPrefetchPositions()方法。该方法在数据预取开启时被 RecyclerView 调用（LayoutManager 的默认实现什么都不做）。在嵌套的内层 RecyclerView 中，如果想让LayoutManager 预取数据，同样应当实现 LayoutManager.collectInitialPrefetchPositions()。
+==========================================
+8、getExtraLayoutSpace为LayoutManager设置更多的预留空间
+在RecyclerView的元素比较高，一屏只能显示一个元素的时候，第一次滑动到第二个元素会卡顿。  
+
+RecyclerView (以及其他基于adapter的view，比如ListView、GridView等)使用了缓存机制重用子 view（即系统只将屏幕可见范围之内的元素保存在内存中，在滚动的时候不断的重用这些内存中已经存在的view，而不是新建view）。
+
+这个机制会导致一个问题，启动应用之后，在屏幕可见范围内，如果只有一张卡片可见，当滚动的时 候，RecyclerView找不到可以重用的view了，它将创建一个新的，因此在滑动到第二个feed的时候就会有一定的延时，但是第二个feed之 后的滚动是流畅的，因为这个时候RecyclerView已经有能重用的view了。
+
+如何解决这个问题呢，其实只需重写getExtraLayoutSpace()方法。根据官方文档的描述 getExtraLayoutSpace将返回LayoutManager应该预留的额外空间（显示范围之外，应该额外缓存的空间）。
+
+LinearLayoutManager linearLayoutManager = new LinearLayoutManager(this) {
+    @Override
+    protected int getExtraLayoutSpace(RecyclerView.State state) {
+        return 300;
+    }
+};
+==========================================
+9、RecycledViewPool的复用
+在TabLayout+ViewPager+RecyclerView的场景中，当多个RecyclerView有相同的item布局结构时，多个RecyclerView共用一个RecycledViewPool可以避免创建ViewHolder的开销，避免GC。RecycledViewPool对象可通过RecyclerView对象获取，也可以自己实现。
+
+RecycledViewPool mPool = mRecyclerView1.getRecycledViewPool();
+下一个RecyclerView可直接进行setRecycledViewPool
+mRecyclerView2.setRecycledViewPool(mPool);
+mRecyclerView3.setRecycledViewPool(mPool);
+
+注意：
+（1）RecycledViewPool是依据ItemViewType来索引ViewHolder的，必须确保共享的RecyclerView的Adapter是同一个，或view type 是不会冲突的。
+（2）RecycledViewPool可以自主控制需要缓存的ViewHolder数量，每种type的默认容量是5，可通过setMaxRecycledViews来设置大小。mPool.setMaxRecycledViews(itemViewType, number); 但这会增大应用内存开销，所以也需要根据应用具体情况来使用。
+（3）利用此特性一般建议设置layout.setRecycleChildrenOnDetach(true);此属性是用来告诉LayoutManager从RecyclerView分离时，是否要回收所有的item，如果项目中复用RecycledViewPool时，开启该功能会更好的实现复用。其他RecyclerView可以复用这些回收的item。
+什么时候LayoutManager会从RecyclerView上分离呢，有两种情况：1）重新setLayoutManager()时，比如淘宝页面查看商品列表，可以线性查看，也可以表格形式查看，2）还有一种是RecyclerView从视图树上被remove时。但第一种情况，RecyclerView内部做了回收工作，设不设置影响不大，设置此属性作用主要针对第二种情况。
+==========================================
+10、RecyclerView中的一些方法
+onViewRecycled()：当 ViewHolder 已经确认被回收，且要放进 RecyclerViewPool 中前，该方法会被回调。移出屏幕的ViewHolder会先进入第一级缓存ViewCache中，当第一级缓存空间已满时，会考虑将一级缓存中已有的ViewHolder移到RecyclerViewPool中去。在这个方法中可以考虑图片回收。
+
+onViewAttachedFromWindow()： RecyclerView的item进入屏幕时回调
+onViewDetachedFromWindow()：RecyclerView的item移出屏幕时回调
+
+onAttachedToRecyclerView() ：当 RecyclerView 调用了 setAdapter() 时会触发，新的 adapter 回调 onAttached。
+onDetachedFromRecyclerView()：当 RecyclerView 调用了 setAdapter() 时会触发，旧的 adapter 回调 onDetached
+
+setHasStableIds()／getItemId()：setHasStableIds用来标识每一个itemView是否需要一个唯一标识，当stableId设置为true的时候，每一个itemView数据就有一个唯一标识。getItemId()返回代表这个ViewHolder的唯一标识，如果没有设置stableId唯一性，返回NO_ID=-1。通过setHasStableIds可以使itemView的焦点固定，从而解决RecyclerView的notify方法使得图片加载时闪烁问题。注意：setHasStableIds()必须在 setAdapter() 方法之前调用，否则会抛异常。因为RecyclerView.setAdapter后就设置了观察者，设置了观察者stateIds就不能变了。
+```
+
+
+
+##### RecyclerView预布局pre-layout是什么？
+
+```java
+RecyclerView pre-layout原理：
+场景：列表只能显示两个item，当前显示是item1、item2。删除item2，需要item3平滑地移入并占据item2的位置。
+执行动画轨迹，需要起点跟终点，终点是item2的位置，那么起点如何确定呢？由于LayoutManager只加载可见的item，删除item2之前，item3是处于不可见的，它并不会被layout。
+
+pre-layout的生命周期：https://juejin.cn/post/6890288761783975950#heading-1
+为动画执行前，先执行一次pre-layout，将item3加载到布局中。形成一张布局快照（item1、item2、item3）
+再执行一次layout，形成一张布局快照（item1、item3）。对比两张快照，便知道item3的位置了。就知道它该如何做动画了。
+
+//RecyclerView.State#mInPreLayout：pre-layout标志位
+boolean mInPreLayout = false;
+
+//RecyclerView#onLayout -> RecyclerView#dispatchLayout	
+//在dispatchLayout中mInPreLayout的值标记了预布局的生命周期
+    void dispatchLayout() {
+        ...
+        mState.mIsMeasuring = false;
+        if (mState.mLayoutStep == State.STEP_START) {
+            dispatchLayoutStep1(); //分发布局1
+            mLayout.setExactMeasureSpecsFrom(this);
+            dispatchLayoutStep2(); //分发布局2
+        } else if (mAdapterHelper.hasUpdates() || mLayout.getWidth() != getWidth() || mLayout.getHeight() != getHeight()) {
+            mLayout.setExactMeasureSpecsFrom(this);
+            dispatchLayoutStep2();
+        } else {
+            mLayout.setExactMeasureSpecsFrom(this);
+        }
+        dispatchLayoutStep3(); //分发布局3
+    }
+
+    private void dispatchLayoutStep1() {
+        ...
+        mState.mInPreLayout = mState.mRunPredictiveAnimations; //pre-layout开始
+        ...
+        if (mState.mRunPredictiveAnimations) { //pre-layout，会走一次onLayoutChildren
+            ...
+            mLayout.onLayoutChildren(mRecycler, mState);
+            ...
+        }
+        ...
+    }
+
+    private void dispatchLayoutStep2() {
+        ...
+        mState.mInPreLayout = false; //pre-layout结束
+        mLayout.onLayoutChildren(mRecycler, mState); //开始正真的布局
+        ...
+    }
+
+pre-layout的处理逻辑：
+在预布局阶段，循环填充item时，若遇到被移除item，则会忽略它占用的空间，多余空间被用来加载额外的item，这些item在屏幕之外，本来不会被加载。
+
+pre-layout与缓存机制：https://juejin.cn/post/6892809944702124045#heading-7
+每次RecyclerView填充表项之前（onLayoutChildren执行的时候）都会先清空LayoutManager中现存的item，将它们detach并且加入到缓存列表中。然后再从缓存列表中取出item，进行填充。
+
+当item是 不需要更新 或 被移除 或 item索引无效 的时候触发的onLayoutChildren，会缓存到mAttachedScrap列表中。
+反之如果只是item需要更新数据的话，会缓存到mChangedScrap。
+
+
+为什么要detach并缓存表项到 scrap 中，然后紧接着又在填充表项时从中取出？
+因为 RecyclerView 要做item动画，
+为了确定动画的种类和起终点，需要比对动画前和动画后的两张“item快照”，
+为了获得两张快照，就得布局两次，分别是预布局和后布局（布局即是往列表中填充表项），
+为了让两次布局互不影响，就不得不在每次布局前先清除上一次布局的内容（就好比先清除画布，重新作画），
+但是两次布局中所需的某些表项大概率是一摸一样的，若在清除画布时，把item的所有信息都一并清除，那重新作画时就会花费更多时间（重新创建 ViewHolder 并绑定数据），
+RecyclerView 采取了用空间换时间的做法：在清除画布时把表项缓存在 scrap 中，以便在填充表项可以命中缓存，以缩短填充表项耗时。
+```
+
+
+
+#### ViewPager
+
+##### viewpager设置warp_content为什么会无效？
+
+```java
+场景：子View设置了高为100dp，ViewPager设置高为warp_content，根Layout高为match_parent。
+实际：发现ViewPager高并不是100dp，而是占满了根Layout。
+期望：ViewPager受子View高度影响，变成100dp。
+
+原因：
+常规的Layout在onMeasure的时候会先测量所有子View的宽高，然后才测量自己。
+但是ViewPager不一样，ViewPager在onMeasure中是先测量自己。导致了子View无法影响到ViewPager。
+再由于ViewPager是warp_content，那么它被根Layout测量的时候模式为 AT_MOST + 不超过父的剩余大小。
+所以ViewPager沾满了根Layout。
+
+解决：
+重写ViewPager#onMeasure，先测量所有子View。然后将最大的子View宽高传给ViewPager。
+```
+
+
+
+##### 说说viewpager缓存机制？
+
+```java
+mOffscreenPageLimit：离屏缓存页数量。当设置为1时，会缓存当前页左右两边的1页。（默认值为1，传入<1的值也是强制设置为1）
+populate()：该方法在 setAdapter、setOffscreenPageLimit、onMeasure、翻页 等都会被调用。
+Adapter的所有方法都在populate方法里边有调用（populate方法管理着每一个item）。缓存逻辑也是在该方法里边实现的。
+
+void populate(int newCurrentItem) {
+        ...
+        mAdapter.startUpdate(this); //开始更新
+
+        //缓存范围 [startPos, endPos] == [mCurItem - pageLimit, mCurItem + pageLimit]
+        final int pageLimit = mOffscreenPageLimit;
+        final int startPos = Math.max(0, mCurItem - pageLimit);
+        final int N = mAdapter.getCount();
+        final int endPos = Math.min(N - 1, mCurItem + pageLimit);
+
+        ...
+
+        int curIndex = -1;
+        ItemInfo curItem = null;
+        for (curIndex = 0; curIndex < mItems.size(); curIndex++) {
+            final ItemInfo ii = mItems.get(curIndex);
+            if (ii.position >= mCurItem) {
+                if (ii.position == mCurItem) curItem = ii;
+                break;
+            }
+        }
+
+        if (curItem == null && N > 0) {
+            //addNewItem方法：调用mAdapter.instantiateItem 以及 构建ItemInfo添加到mItems缓存里边
+            //ItemInfo缓存着Adapter#instantiateItem构建出来的对象（返回Fragment就缓存Fragment，返回View就缓存View）
+            curItem = addNewItem(mCurItem, curIndex);
+        }
+
+        if (curItem != null) {
+            //左边item进行缓存
+            float extraWidthLeft = 0.f;
+            int itemIndex = curIndex - 1;
+            ItemInfo ii = itemIndex >= 0 ? mItems.get(itemIndex) : null;
+            final int clientWidth = getClientWidth();
+            final float leftWidthNeeded = clientWidth <= 0 ? 0 :
+                    2.f - curItem.widthFactor + (float) getPaddingLeft() / (float) clientWidth;
+            for (int pos = mCurItem - 1; pos >= 0; pos--) {
+                if (extraWidthLeft >= leftWidthNeeded && pos < startPos) {
+                    if (ii == null) {
+                        break;
+                    }
+                    if (pos == ii.position && !ii.scrolling) {
+                        mItems.remove(itemIndex);
+                        mAdapter.destroyItem(this, pos, ii.object);
+                        itemIndex--;
+                        curIndex--;
+                        ii = itemIndex >= 0 ? mItems.get(itemIndex) : null;
+                    }
+                } else if (ii != null && pos == ii.position) {
+                    extraWidthLeft += ii.widthFactor;
+                    itemIndex--;
+                    ii = itemIndex >= 0 ? mItems.get(itemIndex) : null;
+                } else {
+                    ii = addNewItem(pos, itemIndex + 1);
+                    extraWidthLeft += ii.widthFactor;
+                    curIndex++;
+                    ii = itemIndex >= 0 ? mItems.get(itemIndex) : null;
+                }
+            }
+
+            //右边item进行换粗
+            float extraWidthRight = curItem.widthFactor;
+            itemIndex = curIndex + 1;
+            if (extraWidthRight < 2.f) {
+                ii = itemIndex < mItems.size() ? mItems.get(itemIndex) : null;
+                final float rightWidthNeeded = clientWidth <= 0 ? 0 :
+                        (float) getPaddingRight() / (float) clientWidth + 2.f;
+                for (int pos = mCurItem + 1; pos < N; pos++) {
+                    if (extraWidthRight >= rightWidthNeeded && pos > endPos) {
+                        if (ii == null) {
+                            break;
+                        }
+                        if (pos == ii.position && !ii.scrolling) {
+                            mItems.remove(itemIndex);
+                            mAdapter.destroyItem(this, pos, ii.object);
+                            ii = itemIndex < mItems.size() ? mItems.get(itemIndex) : null;
+                        }
+                    } else if (ii != null && pos == ii.position) {
+                        extraWidthRight += ii.widthFactor;
+                        itemIndex++;
+                        ii = itemIndex < mItems.size() ? mItems.get(itemIndex) : null;
+                    } else {
+                        ii = addNewItem(pos, itemIndex);
+                        itemIndex++;
+                        extraWidthRight += ii.widthFactor;
+                        ii = itemIndex < mItems.size() ? mItems.get(itemIndex) : null;
+                    }
+                }
+            }
+
+            calculatePageOffsets(curItem, curIndex, oldCurInfo);
+            //FragmentPagerAdapter：调用了Fragment#setUserVisibleHint
+            mAdapter.setPrimaryItem(this, mCurItem, curItem.object);
+        }
+        //FragmentPagerAdapter：调用了FragmentTransaction#commitNowAllowingStateLoss
+        mAdapter.finishUpdate(this); //结束更新
+        ...
+    }
 ```
 
 

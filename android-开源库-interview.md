@@ -1,12 +1,403 @@
 #### RxJava
 
+##### 说说RxJava的原理。
+
+```java
+Observable.create((ObservableOnSubscribe) emitter -> { 
+        emitter.onNext();
+        emitter.onComplete();
+    }).subscribe(new Observer());
+
+原理：
+Observable#subscribe：
+	1、将Observer对象传给新创建的一个Emitter对象中。
+	2、Emitter对象实现了Observer的所有方法，并且在对应的方法中调用Observer对象对应的方法。
+		例如：Emitter#onNext 调用了 Observer#onNext。
+	3、而这个新创建的Emitter对象会传给一个ObservableOnSubscribe对象。
+	4、这个ObservableOnSubscribe对象，就是在create操作符里边创建的。
+	这样就形成一个上下游的持有链。
+	当在create操作符中操作emitter，就相当于间接地在操作observer。
+```
+
+
+
+##### onComplete之后还能发射onNext、onError吗？
+
+````java
+不能了。
+因为onComplete、onError处理完之后，就会调用dispose()做释放了。
+而onNext、onError、onComplete等方法在执行前，都会做isDisposed的判断。
+
+@Override
+public void onComplete() {
+    if (!isDisposed()) {
+        try {
+            observer.onComplete();
+        } finally {
+            dispose();
+        }
+    }
+}
+
+@Override
+public void onNext(T t) {
+    ...
+    if (!isDisposed()) {
+        observer.onNext(t);
+    }
+}
+
+````
+
+
+
+##### 说说map、flatMap、concatMap的区别
+
+```java
+map：根据原始数据类型 返回 另外一种数据类型
+在Emitter#onNext的时候，使用了Function#apply实现类型变换
+		@Override
+        public void onNext(T t) {
+            ...
+            U v;
+            try {
+                v = ObjectHelper.requireNonNull(mapper.apply(t), "The mapper function returned a null value.");
+            } catch (Throwable ex) {
+                fail(ex); return;
+            }
+            downstream.onNext(v);
+        }
+
+concatMap和flatMap：
+相同点：功能是一样的，将一个发射数据的Observable变换为多个Observable。
+不同点：
+concatMap是有序的（采用concat），flatMap是无序的（采用merge）。（concatMap输出的顺序与原序列保持一致。而flatMap则不一定有可能出现交错。）
+merge：多个Observable交叉合并。
+//如果ob1有延时，会到ob2发射了，不等ob1了。
+Observable.merge(ob1, ob2).subscribe();
+
+concat：多个Observable顺序合并。
+//如果ob1有延时，会一直等到ob1发射完成，ob2才会发射。
+Observable.concat(ob1, ob2).subscribe();
+
+zip：多个Observable发射的数据合为一体
+Observable.zip(ob1, ob2, new BiFunction<String, String, JSONObject>() {
+            @Override
+            public JSONObject apply(String response, String response2) throws Exception {
+                return new JSONObject().put("one", response).put("two", response2);
+            }
+        }).subscribe();
+```
+
+
+
+##### Maybe、Observer、Single、Flowable、Completable几种观察者的区别，以及他们在什么场景用？
+
+```java
+Maybe：发数据只发一条。
+没有onNext方法。
+发送onSuccess就不会再发送其他了，发送onComplete那么相当于没发数据。
+public interface MaybeObserver<@NonNull T> {  
+    void onSubscribe(@NonNull Disposable d);
+    void onSuccess(@NonNull T t);  
+    void onError(@NonNull Throwable e);
+    void onComplete();
+}
+
+Observer：能发送多条数据的。
+有onNext方法，没有onSuccess方法。
+
+Single：发数据只发一条。要么成功要么失败。
+没有onNext方法，没有onComplete方法。
+public interface SingleObserver<@NonNull T> {
+    void onSubscribe(@NonNull Disposable d);
+    void onSuccess(@NonNull T t);
+    void onError(@NonNull Throwable e);
+}
+
+Completable：不能发数据，只会发成功或失败。
+public interface CompletableObserver {
+    void onSubscribe(@NonNull Disposable d);
+    void onComplete();
+    void onError(@NonNull Throwable e);
+}
+
+Flowable：支持背压策略，用于处理发送大量事件的场景。
+MISSING：被观察者发送大量事件，当观察者处理不过来时，就放入缓存池。如果缓存池满了，就会抛出异常，并给出友好提示。
+ERROR：  被观察者发送大量事件，当观察者处理不过来时，就放入缓存池。如果缓存池满了，就会抛出异常。
+BUFFER： 被观察者发送大量事件，当观察者处理不过来时，就放入缓存池。如果缓存池满了，就会等待下游处理。
+DROP：   被观察者发送大量事件，当观察者处理不过来时，就放入缓存池。如果缓存池满了，就会无法存入事件。
+LATEST： 被观察者发送大量事件，当观察者处理不过来时，就放入缓存池。如果缓存池满了，就会丢弃旧的事件，缓存新的事件进来。
+```
+
+
+
+##### RxJava切换线程是怎么实现的?
+
+```java
+subscribeOn(Schedulers.io())：指定上游的Observable的线程
+    1、将下游Observer，包装成另一个Observer（SubscribeOnObserver）。
+    2、将一个Runnable丢给Scheduler，并触发Scheduler，Scheduler在线程池里边申请一个可用线程1，线程1运行走Runnable#run方法。
+    3、run方法中执行会Observable#subscribe将包装Observer传给上游。
+    4、届时上游Observable已经是处于线程1中了，Observable发射数据就是在子线程中发射的了。
+
+
+observeOn(AndroidSchedulers.mainThread())：指定下游的Observer的线程
+    1、将下游Observer，包装成另一个Observer（ObserveOnObserver），并调用Observable#subscribe传给上游。
+    2、包装Observer里边缓存着Scheduler（HandlerScheduler）以及一个数据队列。
+    3、当上游调用了其onNext，就会将数据加入到队列中，并且触发Scheduler。
+    4、Scheduler内执行Handler#postRunnable，让包装Observer走run方法（包装的Observer实现了Runnable）
+    5、run方法就会从队列中取数据，执行最下游Observer的onNext方法。
+```
+
+
+
+##### RxJava的subscribeOn多次调用哪个有效?
+
+```java
+第一次的subscribeOn。
+但是调多次subscribeOn会切多次线程。每一次subscribeOn，都会包装成一个Observer，然后在切的线程中用上游的Obserable执行subscribe，将这个包装Observer往上传。
+            Observable.create()
+                .subscribeOn(Schedulers.io()) //为create()切线程
+                .subscribeOn(Schedulers.io()) //为上一个subscribeOn切线程
+                .subscribeOn(Schedulers.io()) //为上一个subscribeOn切线程
+                .subscribe();
+```
+
+
+
+##### RxJava的observeOn多次调用哪个有效?
+
+```java
+RxJava的observeOn多次调用哪个有效?
+最后一次的observeOn。
+但是调多次observeOn会切多次线程。每一次subscribeOn，都会包装成一个Observer，然后在切的线程中用上游的Obserable执行subscribe，将这个包装Observer往上传。
+  					Observable.create()
+                .observeOn(Schedulers.io()) //为下一个observeOn切线程
+                .observeOn(Schedulers.io()) //为下一个observeOn切线程
+                .observeOn(Schedulers.io()) //为subscribe的Observe切线程
+                .subscribe();
+```
+
+
+
+##### 说说RxBus的实现原理？
+
+```java
+Processor 既是观察者，也是被观察者。Processor 继承 FlowableProcessor支持背压。
+
+AsyncProcessor
+不论何时订阅，都只发射最后一个数据，如果因为异常而终止，不会释放任何数据，但是会传递一个异常通知。
+
+BehaviorProcessor
+发射订阅之前的一个数据和订阅之后的全部数据。如果订阅之前没有值，可以使用默认值。
+
+PublishProcessor
+从哪里订阅就从哪里发射数据。
+
+ReplayProcessor
+无论何时订阅，都发射所有的数据。
+
+SerializedProcessor
+其它 Processor 不要在多线程上发射数据，如果确实要在多线程上使用，用这个 Processor 封装，可以保证在一个时刻只在一个线程上执行。
+
+//创建SerializedProcessor，保证线程安全
+mBus = PublishProcessor.create().toSerialized();
+
+发射事件：
+    public void post(Object o) {
+        new SerializedSubscriber<>(mBus).onNext(o);
+    }
+
+接收事件：通过ofType操作符，来过滤事件类型只接收自己关注的类型
+    public <T> Flowable<T> toFlowable(Class<T> tClass) {
+        return mBus.ofType(tClass); 
+    }
+```
+
+
+
+##### 说说Rxjava异常处理以及如果完整捕获。
+
+```java
+1、RxJava自己支持的全局捕获异常
+    RxJavaPlugins.setErrorHandler(new Consumer<Throwable>() {
+            @Override
+            public void accept(Throwable throwable) throws Exception {}
+        });
+但是捕获到的异常信息不全。由于调用栈太深了，有时候并没能给出这个Error在实际项目中的调用路径。
+
+2、RxJavaExtensions（debug环境下可以用，但是release不要用（对每个Observable都提前保存堆栈是非常耗时的，获取堆栈是耗时的））
+https://github.com/akarnokd/RxJavaExtensions
+使用：
+1、开启：RxJavaAssemblyTracking.enable();
+2、发生异常时调用：RxJavaAssemblyException.find
+RxJavaPlugins.setErrorHandler(new Consumer<Throwable>() {
+            @Override
+            public void accept(Throwable throwable) throws Exception {
+                Throwable thw = RxJavaAssemblyException.find(throwable);
+            }
+        });
+
+原理：
+1、通过RxJava提供的插件方法，构建自己的Observable。可以在每个操作符中包裹上自己的Observable
+        RxJavaPlugins.setOnObservableAssembly(new Function<Observable, Observable>() {
+            @Override
+            public Observable apply(Observable f) throws Exception {
+                if (f instanceof Callable) {
+                    ...
+                    //将Observable包装起来，然后在返回自己的Observable
+                    return new ObservableOnAssemblyCallable(f);
+                }
+                return new ObservableOnAssembly(f);
+            }
+        });
+
+        public static void setOnObservableAssembly(Function<...> onObservableAssembly) {
+            RxJavaPlugins.onObservableAssembly = onObservableAssembly;
+        }
+
+        //create操作符
+        public static <T> Observable<T> create(ObservableOnSubscribe<T> source) {
+            return RxJavaPlugins.onAssembly(new ObservableCreate<T>(source));
+        }
+
+        //RxJavaPlugins#onAssembly
+        public static <T> Observable<T> onAssembly(@NonNull Observable<T> source) {
+            Function<? super Observable, ? extends Observable> f = onObservableAssembly;
+            //这里已经变成了RxJavaExtensions的Observable
+            if (f != null) {
+                //apply方法：f.apply(source);
+                return apply(f, source);
+            }
+            return source;
+        }
+
+2、
+由于操作符的Observable被自己的Observable包裹了。操作都是经过自己的Observable。
+自己的Observable在构造函数的时候，将 error 信息报错下来，等到出错的时候，再将 error 信息，替换成保存下来的 error信息。
+
+3、RxJavaAssemblyException.find
+如果是RxJavaAssemblyException（自己保存下来的error类型），就直接返回。
+```
+
+
+
+
+
 #### OKHttp
+
+##### OKHttp 请求的整体流程是怎样的?
+
+```java
+1、通过建造者模式构建 OKHttpClient 与 Request
+2、OKHttpClient 通过 newCall 发起一个新的请求
+3、通过分发器维护请求队列与线程池，完成请求调配
+4、通过五大默认拦截器完成请求重试，缓存处理，建立连接等一系列操作
+5、得到网络请求结果
+```
+
+
+
+##### OKHttp 分发器是怎样工作的?
+
+```java
+分发器的主要作用是维护请求队列与线程池。
+比如我们有100个异步请求，肯定不能把它们同时请求，而是应该把它们排队分个类，分为正在请求中的列表和正在等待的列表， 等请求完成后，即可从等待中的列表中取出等待的请求，从而完成所有的请求。
+
+同步请求：同步请求不需要线程池，也不存在任何限制。所以分发器仅做一下记录。
+异步请求：正在执行的任务未超过最大限制64，同时同一Host 的请求不超过5个，则会添加到正在执行队列，同时提交给线程池。
+否则先加入等待队列。每个任务完成后，都会调用分发器的 finished 方法,这里面会取出等待队列中的任务继续执行
+```
+
+
+
+##### OKHttp 拦截器是如何工作的?
+
+```java
+责任链：执行链上有多个节点，每个节点都有机会（条件匹配）处理请求事务，如果某个节点处理完了就可以根据需求传递给下一个节点 或 直接返回。
+
+应用拦截器：拿到的是原始请求，可以添加一些自定义 header、通用参数、参数加密、网关接入等等。
+RetryAndFollowUpInterceptor：处理错误重试和重定向
+BridgeInterceptor：应用层和网络层的桥接拦截器，主要工作是为请求添加cookie、添加固定的header，比如Host、Content-Length、Content-Type、User-Agent等等，然后保存响应结果的cookie，如果响应使用gzip压缩过，则还需要进行解压。
+CacheInterceptor：缓存拦截器，如果命中缓存则不会发起网络请求。
+ConnectInterceptor：连接拦截器，内部会维护一个连接池，负责连接复用、创建连接（三次握手等等）、释放连接以及创建连接上的socket流。
+networkInterceptors：用户自定义拦截器，通常用于监控网络层的数据传输。（网络拦截器）
+CallServerInterceptor：请求拦截器，在前置准备工作完成后，真正发起了网络请求。
+```
+
+
+
+##### 应用拦截器和网络拦截器有什么区别?
+
+```java
+应用拦截器在RetryAndFollowUpInterceptor和CacheInterceptor之前，一旦请求发生错误或者重定向都会执行多次。但是应用拦截器永远只会触发一次。
+
+应用拦截器因为只会调用一次，通常用于统计客户端的网络请求发起情况；
+网络拦截器一次调用代表了一定会发起一次网络通信，因此通常可用于统计网络链路上传输的数据。
+```
+
+
+
+##### OKHttp 如何复用 TCP 连接?
+
+```java
+ConnectInterceptor 的主要工作就是负责建立 TCP 连接，建立 TCP 连接需要经历三次握手四次挥手等操作。
+每个 HTTP 请求都要新建一个 TCP 比较耗资源。在Http1.1已经支持 keep-alive（即多个 Http 请求复用一个 TCP 连接）。
+
+OKHttp在ConnectInterceptor同样也有实现：具体实现在ExchangeFinder#findConnection
+①看看是不是重定向，是则说明已经有连接了；
+②通过address、host、port、代理去连接池匹配；
+③通过理路由信息，IP再去连接池匹配；
+④新建连接，TCP + TLS握手连接服务（阻塞）；
+⑤使用新连接去连接池匹配（确保HTTP2.0的多路复用）；
+⑥新连接存入连接池，返回连接。
+```
+
+
+
+##### OKHttp 空闲连接如何清除?
+
+```java
+1、在将连接加入连接池时就会启动定时任务
+2、有空闲连接的话，如果最长的空闲时间大于5分钟 或 空闲数 大于5，就移除关闭这个最长空闲连接；如果 空闲数 不大于5 且 最长的空闲时间不大于5分钟，就返回到5分钟的剩余时间，然后等待这个时间再来清理。
+3、没有空闲连接就等5分钟后再尝试清理。
+```
+
+
+
+##### OKHttp 有哪些优点?
+
+```java
+使用简单，在设计时使用了外观模式，将整个系统的复杂性给隐藏起来，将子系统接口通过一个客户端 OkHttpClient 统一暴露出来。
+扩展性强，可以通过自定义应用拦截器与网络拦截器，完成用户各种自定义的需求
+功能强大，支持 Spdy、Http1.X、Http2、以及 WebSocket 等多种协议
+通过连接池复用底层 TCP(Socket)，减少请求延时
+无缝的支持 GZIP 减少数据流量
+支持数据缓存,减少重复的网络请求
+支持请求失败自动重试主机的其他 ip，自动重定向
+```
+
+
+
+##### OKHttp 框架中用到了哪些设计模式?
+
+```java
+构建者模式：OkHttpClient 与 Request 的构建都用到了构建者模式
+外观模式：OkHttp使用了外观模式,将整个系统的复杂性给隐藏起来，将子系统接口通过一个客户端 OkHttpClient 统一暴露出来。
+责任链模式: OKHttp 的核心就是责任链模式，通过5个默认拦截器构成的责任链完成请求的配置
+享元模式: 享元模式的核心即池中复用, OKHttp 复用 TCP 连接时用到了连接池，同时在异步请求中也用到了
+```
+
+
+
+
 
 #### Retrofit
 
-1. 说说你对retrofit的了解。
 
-   
+
+
 
 #### Glide
 
@@ -63,7 +454,7 @@ Drawable.class -> DrawableImageViewTarget
 
 
 
-##### 说说Glide如果监控生命周期的 +3
+##### 说说Glide如何监控生命周期的 +3
 
 ```java
 with(context)：构建RequestManager
@@ -235,14 +626,3 @@ CenterCrop、CenterInside、FitCenter类都是继承自BitmapTransformation，�
 
 1. 说说databinding的原理。
 
-   
-
-#### 插件化
-
-1. 启动Activity的hook方式。taskAffity。
-
-   
-
-#### 其他
-
-1. 组件化中module和app之间的区别。module通信是如何实现的。
