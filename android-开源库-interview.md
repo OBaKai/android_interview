@@ -620,6 +620,84 @@ CenterCrop、CenterInside、FitCenter类都是继承自BitmapTransformation，�
 
 
 
+### EventBus
+
+##### 说说EventBus原理
+
+```java
+Bus总线：Map<Event, List<Subscription>>
+Subscription：包装着 订阅者类对象 以及 一个接收事件的方法
+
+register(obj)：
+1、根据订阅者类，反射找出所有对应的方法（带@Subscribe的方法）；
+2、将这些方法根据事件类型，分类缓存到Bus总线。
+
+unregister(obj)：
+1、根据事件类型，从总线中查找到订阅方法列表；
+2、遍历订阅方法列表，找到对应订阅者类的方法，将其移除。
+
+post(event)：
+1、根据事件类型，从总线中找出订阅该事件的集合；
+2、遍历这个集合，通过反射将事件对象传给所有订阅方法；
+3、发送事件的时候，会根据订阅方法在注解中配置的ThreadMode来切换到对应线程，然后再发射。
+
+postSticky(event)：
+1、先将事件类型和事件对象保存到粘性事件队列中；
+2、然后走post(event)流程；
+3、register(obj)的时候，如果注解中配置可接受粘性事件，则会去粘性事件队列查找使用有对应的事件，如果有则发送。
+```
+
+
+
+##### 说说EventBus3的索引加速
+
+```java
+索引加速：订阅过程中 通过APT（注解处理器）生成的索引类 取代 大量反射，从而提高订阅过程（register(obj)）的性能。
+
+需要引入EventBusAnnotationProcessor：
+apply plugin: 'com.neenbedankt.android-apt'
+apt {
+    arguments {
+        eventBusIndex "com.llk.xxx.AAAIndex"
+    }
+}
+
+apt 'org.greenrobot:eventbus-annotation-processor:3.0.1'
+
+
+编译期，注解处理器会遍历所有的类找出我们订阅的方法，然后生成我们配置的索引类。
+public class AAAIndex implements SubscriberInfoIndex {
+private static final Map<Class<?>, SubscriberInfo> SUBSCRIBER_INDEX;
+    static {
+        SUBSCRIBER_INDEX = new HashMap<Class<?>, SubscriberInfo>();
+        // 每有一个订阅者类，就调用一次putIndex往索引中添加相关的信息
+        putIndex(new SimpleSubscriberInfo(MainActivity.class, true, new SubscriberMethodInfo[] {
+        	// 类中每一个被Subscribe标识的方法都在这里添加进来
+            new SubscriberMethodInfo("onEvent", MainActivity.DriverEvent.class, ThreadMode.POSTING, 0, false), 
+        })); 
+    }
+    // 下面的代码就是EventBusAnnotationProcessor中写死的了
+    private static void putIndex(SubscriberInfo info) {
+        SUBSCRIBER_INDEX.put(info.getSubscriberClass(), info);
+    }
+
+    @Override
+    public SubscriberInfo getSubscriberInfo(Class<?> subscriberClass) {
+        SubscriberInfo info = SUBSCRIBER_INDEX.get(subscriberClass);
+        if (info != null) {
+            return info;
+        } else {
+            return null;
+        }
+    }
+}
+
+EventBusBuilder.addIndex(new AAAIndex())：添加索引类
+那么在register(obj)的时候，就会走索引方式查找订阅方法，而不是通过大量的反射。从而提高性能。
+```
+
+
+
 
 
 #### Databinding
