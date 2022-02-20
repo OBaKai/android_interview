@@ -69,7 +69,6 @@ Exception when starting activity com.melody.test/.SecondActivity
 警告的打印：extras size: 520236。 崩溃的打印：data parcel size: 522968。
 大小相差：2732 约等于 2.7KB。
 说明进程内有其他的异步调用占用了2.7KB空间，如果想要不崩溃，传的大小应该是 ((1MB - 8KB)/2) -1 - 2.7KB。
-
 ```
 
 
@@ -257,7 +256,6 @@ onSaveInstanceState方法只适合保存瞬态数据, 比如UI控件的状态, �
 2、在Activity#onResume之后也会发出一个10s的兜底事件，防止stop/destory一直不执行。
 3、如果在主线程的Handler消息一直很繁忙的话，是会影响stop/destory的回调。最严重的情况会出现10s才回调。
 
-  
 详细分析：
 finish()执行流程：
 (app)finish -> AMS#finishActivity -> ActivityStack#finishActivityLocked -> ActivityStack#startPausingLocked -> 
@@ -2994,6 +2992,215 @@ Java堆既可以被实现成固定大小，也可以是扩展的。如果在 Jav
 唯一一个在《Java虚拟机规范》中没有规定任何 OutOfMemoryError 情况的区域是 程序计数器。
 程序计数器：是一块较小的内存空间，它可以看作是当前线程所执行的字节码的行号指示器。如果线程正在执行的是一个Java方法，这个计数器记录的是正在执行的虚拟机字节码指令的地址；如果正在执行的是本地（Native）方法，这个计数器值则应为空（Undefined）。
 ```
+
+
+
+##### Anr监控、死锁监控（灵感源自系统Watchdog）
+
+```java
+系统Watchdog原理：
+1、Watchdog一个单例类，也是一个线程。在SystemServer中会启动它；
+2、它维护着一个HandlerChecker列表，而HandlerChecker里边又维护了一个Monitor列表；
+3、HandlerChecker是用来检查Handler是否有消息阻塞，Monitor是用来检测线程是否有死锁；
+4、Watchdog会有一个专门检测线程死锁的HandlerChecker（mMonitorChecker），也会加入到HandlerChecker列表里边；
+5、Watchdog线程会每30s遍历一次HandlerChecker列表发送检查事件。然后统计是否有检查未完成状态的HandlerChecker；
+6、如果出现未检查完成的的HandlerChecker，超过60s之后就会dump堆栈日志以及重启SystemServer；
+7、当Handler执行HandlerChecker的事件之后就认为检查完成，然后HandlerChecker就会对Monitor列表进行死锁检查；
+8、如果出现死锁，那么HandlerChecker的Handler所在的线程就会阻塞。下一次检查就会无法完成走步骤6的逻辑。
+
+源码分析：
+class Watchdog extends Thread
+    关键属性：
+    ArrayList<HandlerChecker> mHandlerCheckers //HandlerChecker列表
+    HandlerChecker mMonitorChecker; //在构造函数里边添加到HandlerChecker列表，这个Checker专门用来监听线程死锁
+
+    //检查状态
+    static final int COMPLETED = 0;   //检查完成
+    static final int WAITING = 1;     //检查未完成，等待中（<30s）
+    static final int WAITED_HALF = 2; //检查未完成，等待中（30s<time<60s）
+    static final int OVERDUE = 3;     //检查未完成，不能忍了要炸了（>60s）
+
+    关键方法：
+    addThread(Handler thread) //根据Handler创建一个HandlerChecker，并且添加到mHandlerCheckers。
+    addMonitor(Monitor monitor) //将Monitor添加到mMonitorChecker里边。
+    run()方法：
+        1、每30s执行发起一次检查，遍历HandlerChecker列表对每个HandlerChecker发起检查（HandlerChecker#scheduleCheckLocked）。
+        2、然后检查所有HandlerChecker的状态（HandlerChecker#getCompletionStateLocked），看看是不是有处于检查未完成的HandlerChecker
+        3、如果有未完成的HandlerChecker，根据状态做出对应的操作
+            WAITED_HALF：dump这个HandlerChecker对应线程的堆栈日志
+            OVERDUE：找出出问题的HandlerChecker，dump堆栈日志、eventlog、dropbox log。最后重启SystemServer。
+
+     
+class HandlerChecker implements Runnable
+    Handler mHandler; //线程的Handler
+    ArrayList<Monitor> mMonitors
+    private boolean mCompleted; //检查是否已经完成，构造函数中会设为true
+    private long mStartTime; //检查开始时间
+    private Monitor mCurrentMonitor; //当前执行的Monitor（如果出现死锁，该属性就会有值）
+
+    scheduleCheckLocked方法解析：发起检查
+        public void scheduleCheckLocked() {
+            //没有锁需要监听 同时 消息队列没有消息在休眠中，无需做检查
+            if (mMonitors.size() == 0 && mHandler.getLooper().getQueue().isPolling()) {
+                mCompleted = true;
+                return;
+            }
+            //上一个检查还没结束
+            if (!mCompleted) {
+                return;
+            }
+
+            mCompleted = false;
+            mCurrentMonitor = null;
+            mStartTime = SystemClock.uptimeMillis(); //记录一下检查开始时间
+            mHandler.postAtFrontOfQueue(this); //往消息队列发送消息（插入消息队列头部）
+        }
+
+    run方法解析：因为postRunnable，所有如果Handler执行消息会走到这里
+    public void run() {
+            final int size = mMonitors.size();
+            for (int i = 0 ; i < size ; i++) { //遍历所有Monitor
+                synchronized (Watchdog.this) {
+                    //记录当前的Monitor
+                    //如果出现阻塞超时，就会通过mCurrentMonitor，打印其实现类。从而知道哪个锁出现死锁
+
+                    mCurrentMonitor = mMonitors.get(i); 
+                }
+                //Monitor接口的实现方法中，一般就是获取锁操作。如果一直获取不到锁，就会一直卡着（出现死锁）
+                mCurrentMonitor.monitor();
+            }
+
+            synchronized (Watchdog.this) {
+                mCompleted = true;
+                mCurrentMonitor = null;
+            }
+        }
+
+
+    getCompletionStateLocked方法解析：获取检查状态
+        public int getCompletionStateLocked() {
+            if (mCompleted) {
+                return COMPLETED;
+            } else { //没有检查完成
+                long latency = SystemClock.uptimeMillis() - mStartTime;
+                //mWaitMax 最大等待时长（默认60s）
+                if (latency < mWaitMax/2) { //检查超时，但在容忍范围内
+                    return WAITING;
+                } else if (latency < mWaitMax) { //检查超时，已经超过一半的容忍范围了
+                    return WAITED_HALF;
+                }
+            }
+            return OVERDUE; //检查超时，已经无法容忍了
+        }
+
+
+interface Monitor {
+    void monitor();
+}
+
+
+AMS中的使用
+AMS构造函数中：
+    Watchdog.getInstance().addMonitor(this);（AMS实现了Monitor接口）
+    Watchdog.getInstance().addThread(mHandler);
+AMS#monitor()：
+    public void monitor() {
+        synchronized (this) { } //获取一下AMS对象锁，看看能不能获取到
+    }
+```
+
+
+
+##### 稳定性优化
+
+```java
+稳定性优化包括：Java crash；Native crash；ANR；业务逻辑的正常运行。
+1、Java crash
+	① bugly：crash收集以及上报（release环境记得上传符号表）
+		优点：统计信息多而且详细
+		缺点：经常出现崩溃堆栈不完整的情况
+	② rxjava全局捕获：捕获在rxjava调用链中发生的异常（设置阀门，超过阀门值自动上报）
+		使用场景：可以进行集中收集，必要情况下可以保存本地上报到后台
+		debug环境：开启RxJavaExtensions库，可以打印出完整的堆栈
+
+	③ 接管Looper：捕获主线程中出现的carsh（黑科技）（设置阀门，超过阀门值自动上报）
+		如果某些场景在工作时的崩溃，这些场景不影响正常流程的话，可以在接管的Looper中捕获，提高App稳定性。 
+		handler.post(() -> {
+            while (true){
+                try{
+                    Looper.loop(); //接管Looper
+                }catch (Exception e){
+                    //do something 可收集崩溃信息
+
+                    //忽略某些场景出现的崩溃
+                    String stack = Log.getStackTraceString(e);
+                    if (stack.contains("某View") || ...){
+                        ...
+                    }else{
+                        throw e;
+                    }
+                }
+            }
+        });
+====================================================
+  
+2、Native crash
+   ① ndk工具 - objdump：输出so的函数地址，根据崩溃信息中的地址找到对应出错的地方。根据arm的brk指令，定位问题原因。
+	 ② google breakpad：收集native crash日志。
+====================================================
+  
+3、ANR
+anr发生原理
+生命周期：ANS通知app走每一个生命周期之前都会安放定时炸弹，app走完生命周期就会通知ANS，ANS就会拆炸弹。如果定时炸弹超时了就会anr。
+input事件：
+	1）如果在dispatchTouchEvent, onTouchEvent等处于consumeEvents调用链中执行耗时操作，即使未达到5s，也可能因为事件累计导致ANR。导致ANR的条件是在有PendingEvent时，WaitQueue中累积事件的总处理时长大于5s。
+	2）如果在ButtonClicked等非consumeEvents调用链中执行耗时操作，一定是大于5s（且有PendingEvent）才会触发ANR。
+
+① anr监控：(本地阀门，超过阀门值自动上报日志到后台。比如：设备累计出现6次 或 一天内出现3次 自动上报到后台。不一定每次都会anr但是这也是非常危险的信号，需要我们重点关注，为什么会出现那么长的耗时)
+  1) 自定义Watchdog：监控线程耗时（主线程就是监控anr了）、监控死锁
+  //监控线程耗。如果是主线程监控anr的话，休眠时间可以设置小于5s的。
+  //比如每4s 走一次检查，如果4s还没检查完就dump堆栈。
+  addThread(Handler thread)
+  //监控死锁
+  addMonitor(Monitor monitor) 
+
+  2) Looper#setMessageLogging：重写Looper的日志打印logging（监控Handler消息执行是否有耗时，用于统计操作耗时、分析潜在anr风险）
+  执行消息前：logging.println(">>>>> Dispatching to " + msg.target + " " + msg.callback + ": " + msg.what);
+  执行消息后：logging.println("<<<<< Finished to " + msg.target + " " + msg.callback);
+
+② adb bugreport > bugreport.txt：打包整个系统平台和某个app在运行一段时间之内的所有信息。
+	battery historian的分析工具，图形化解析bugreport.txt文件。（https://github.com/google/battery-historian）
+③ data\anr\traces.txt
+④ dropbox日志（系统运行中所发生的crash、anr、eventlog都会保存在这）：目录/data/system/dropbox（需要root）；可用DropBoxManager取出（需要系统权限）。
+====================================================
+  
+4、业务逻辑的正常运行
+  例如无法正常登录，问题怎么定位？到底出问题是在客户端？服务端？还是第三方sdk？
+  qq -> 业务后台 -> im sdk -> 直播间sdk -> 登录成功
+  优化后：qq -> 业务后台 -> im sdk -> 登录成功 -> 直播间sdk
+  
+日志收集器：推拉结合，实现业务日志上报（用户在平台反馈问题上报；业务后台主动发起拉取等）
+	封装日志打印工具，在业务代码中统一用这个日志工具打印，日志将写入本地。（日志工具：）
+  （约定：不打频繁日志；不打敏感日志；注意日志等级；单次打印注意数据量等）
+	通过长链接场景的消息推送（例如：云信），当后台需要拉取指定用户的日志时发送消息给客户端，客户端收到消息就打包日志上传。
+
+  
+5、其他  
+分析event log：通过EventLog来分析Activity、Process、CPU、Window等相关信息
+支持的事件清单：/system/etc/event-log-tags
+events日志获取：adb logcat -b events
+
+
+稳定性优化量化：
+  1、bugly崩溃率统计；
+  3、Rxjava捕获、Looper捕获上报统计；
+  2、anr监控上报统计；
+  比对优化前版本 与 优化后版本。（一般都是大版本才做比对，例如 2.0.0 -> 3.0.0，2.1.0->2.2.0这种参考价值不高）
+```
+
+
+
+
 
 
 
