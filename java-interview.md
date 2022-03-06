@@ -438,3 +438,432 @@ CMS收集器是基于“标记—清除”算法实现的，它的运作过程�
 1. 动态代理传入的参数有哪些？非接口类能实现动态代理吗？ASM的原理是什么？
 2. utf-8编码中的中文占几个字节；int型几个字节？
 3. 静态代理和动态代理的区别，什么场景使用？
+
+
+
+#### Map相关
+
+##### 说说HashMap的hash方法的作用？（hash方法原理分析）
+
+```java
+hash方法作用是：均匀散列
+
+hash()方法解析：1、Object#hashCode；2、取模算法（hashcode ^ (h >>> 16)）
+static final int hash(Object key) {
+	int h;
+	return (key == null) ? 0 : (h = key.hashCode()) ^ (h >>> 16);
+}
+
+1、Object#hashCode：返回固定长度的摘要
+hash算法：任意长度的输入 转换成 固定长度的摘要输出。这种转换是一种压缩映射，所有不同的输入可能会散列成相同的摘要输出。
+java hash的实现方式：基于内存地址生成；利用位移生成随机数；随机数；自增。
+java hashcode存储：对象的hashCode()未重写时，会返回一个由随机数算法生成的值。因为对象的hashCode不可变所以需要存到对象头中。当再次调用该方法时，会直接返回对象头中的hashcode。如果重写了hashCode()，对象头的code会失效并且也不会把code存对象头了。
+
+为什么要用到hashCode方法？
+一个对象想要插入一个集合中，首先得知道这个集合是否存在该对象，那怎么去集合中查找呢？
+常规方法是调用equals方法来逐个比较，但是如果集合数据量庞大，逐个比较效率会很低。
+集合存储基本上离不开数值下标，如果能够直接通过下标拿到对象效率就非常高的，所有需要用到唯一数值，便有了将对象转化为数值的hashCode方法。
+
+2、取模算法（hashcode ^ (hashcode >>> 16)）（为了均匀散列表的下标，降低极端情况的出现从而导致链表拉长）
+为什么要右移位？为什么右移位16？为什么要异或？
+右移位，右移位16：取int类型的一半，将二进制数对半切开。（提高运算性能）
+异或：降低极端情况的出现。
+  
+HashMap如何根据hash值找到数组中的对象，get方法中有这样一段代码：first = tab[(n - 1) & hash]（tab为数组，n为数组长度）
+假设：数组长度为16（n-1也就是15），并且不做取模算法，直接使用对象的hashCode来做下标。
+对象A hashCode（1000010001110001000001111000000）
+对象B hashCode（0111011100111000101000010100000）
+15 & 对象A的hashCode  -->  0
+15 & 对象B的hashCode  -->  0
+为啥？？？？？因为A、B hashCode后边一大堆000000。这样的散列结果太让人失望了。很明显不是一个好的散列算法。
+但是如果我们将hashCode值右移16位，也就是取int类型的一半，刚好将该二进制数对半切开。并且使用位异或这样的话，就能避免我们上面的情况的发生。
+总的来说，使用位移16位和异或就是防止这种极端情况。
+但是一些极端情况下还是有问题，比如：10000000000000000000000000和 1000000000100000000000000这两个数，如果数组长度是16，那么即使右移16位，在异或，hash 值还是会重复。
+但是为了性能，对这种极端情况，JDK选择了性能。毕竟这是少数情况，为了这种情况去增加 hash 时间，性价比不高。
+```
+
+
+
+##### 为什么get()、put()要用&运算来算下标？公式：(n - 1) & hash
+
+```java
+n为数组长度，下标肯定是在n范围内的。怎么把能够把hash计算变成 0 - n-1 的范围之内呢？
+除法、求余、取模。这些方法速度都不快，最快的还是位运算。
+a % b == (b-1) & a ,当b是底数是2的真数时，等式成立（N = 2的n次幂，2是底数，n为对数，N为真数）。
+
+例如：
+4 % 4 = 0  --->  (4-1) & 4 = 0
+5 % 4 = 1  --->  (4-1) & 5 = 1
+
+非2的n次幂
+4 % 3 = 1  --->  (3-1) & 4 = 0
+5 % 3 = 2  --->  (3-1) & 5 = 0
+6 % 3 = 0  --->  (3-1) & 4 = 2
+7 % 3 = 1  --->  (3-1) & 5 = 3
+8 % 3 = 2  --->  (3-1) & 5 = 0
+
+因为2的n次幂 - 1，二进制全是1。例如 3 -> 11    7 -> 111
+用全是1的二进制数，正好可以做掩码。 在&运算的时候，结果取决于hash值。由于hash值是均匀散列的，所以结果也是均匀散列。
+```
+
+
+
+##### 为什么HashMap容器大小最好设置成2的次幂？（为什么HashMap默认的容器大小是16）
+
+```java
+hash算法的目的是为了让hash值均匀的分布在数组中。如果不使用2的幂次方作为数组的长度，就会失去了hash均匀分布作用。造成不同的key值全部进入到相同的数组下标中形成链表，性能急剧下降。
+我们一定要保证 &运算 中的二进制位全为1，才能最大限度的利用hash值。
+
+HashMap容量大小设置多少最好？ 知道数据量的情况，最好给容器合理的大小。能避免动态扩容带来的性能损耗（动态扩容：除了搬运数据耗时之外，还可能导致成倍的内存浪费）。
+容量大小最好是2的次幂 同时 还需要根据负载系数来权衡设置。
+例如：需要存2个数据，HashMap默认的负载系数是0.75
+2 / 0.75 ≈ 2.67 那么容量最好设置为4，虽然会造成内存浪费，但是可以避免动态扩容。
+如果你预计大概会插入 12 条数据的话，那么初始容量为16简直是完美，一点不浪费，而且也不会扩容。
+```
+
+
+
+##### HashMap的链表、红黑树是如何转换的？
+
+```java
+put操作的时候，发生hash冲突后并且数组下标有元素的情况下。就会判断元素类型是 TreeNode 还是 Node。TreeNode代表为红黑树，Node代表链表。
+
+链表的遍历插入逻辑中，如果链表长度大于8了。就会转换为红黑树（走treeifyBin方法转换）。
+//TREEIFY_THRESHOLD = 8
+if (binCount >= TREEIFY_THRESHOLD - 1) treeifyBin(tab, hash);
+
+并不是走treeifyBin方法就一定会变成红黑树的，还会先判断数组长度有没有大于64，如果没有的话。优先动态扩容，重新离散元素。
+为什么会优先扩容，而不是优先转红黑树呢。因为红黑树虽然查询效率高了，但是插入效率不高。
+//MIN_TREEIFY_CAPACITY = 64
+final void treeifyBin(Node<K,V>[] tab, int hash) {
+        int n, index; Node<K,V> e;
+        if (tab == null || (n = tab.length) < MIN_TREEIFY_CAPACITY)
+            resize();
+        else if ((e = tab[index = (n - 1) & hash]) != null) {
+            TreeNode<K,V> hd = null, tl = null;
+            do {
+                TreeNode<K,V> p = replacementTreeNode(e, null);
+                if (tl == null)
+                    hd = p;
+                else {
+                    p.prev = tl;
+                    tl.next = p;
+                }
+                tl = p;
+            } while ((e = e.next) != null);
+            if ((tab[index] = hd) != null)
+                hd.treeify(tab);
+        }
+    }
+
+为什么不直接使用红黑树呢？
+红黑树为了维护平衡，需要进行左旋，右旋操作。 而单链表不需要。
+如果元素小于8个，查询成本高，新增成本低。
+如果元素大于8个，查询成本低，新增成本高。
+由于红黑树也会存在高成本的地方，所有Hashmap在转换红黑树前，会先做动态扩容判断，就是为了通过牺牲空间来换时间的。
+
+红黑树（一个自平衡的二叉查找树）
+二叉查找树：
+性质1 左子树上所有结点均小于或等于它的根结点；
+性质2 右子树上所有结点均大于或等于它的根结点；
+性质3 左、右子树也分别为二叉排序树。
+
+“查找” -> 二分查找思想 -> 查出结果所需的最大次数就是二叉树的高度 -> 时间复杂度O(logn)
+但是有极端的情况，会让二叉查找树退化为链表。
+依次插入根节点为9如下五个节点：7,6,5,4,3。依照二叉查找树的特性7,6,5,4,3一个比一个小，那么就会成一条直线，也就是成为了线性的查询，时间复杂度变成了O(n)。红黑树登场！！！
+
+红黑树：
+性质1 节点是红色或黑色。
+性质2 根节点是黑色。
+性质3 每个叶节点（NIL节点，空节点）是黑色的。
+性质4 每个红色节点的两个子节点都是黑色。(从每个叶子到根的所有路径上不能有两个连续的红色节点)
+性质5 从任一节点到其每个叶子的所有路径都包含相同数目的黑色节点。
+
+红黑树通过“变色”和“旋转”来维护红黑树的规则，变色就是让黑的变成红的，红的变成黑的，旋转又分为“左旋转”和“右旋转”。
+```
+
+
+
+
+
+##### HashMap为什么是线程不安全？会出现什么问题？
+
+```java
+1.7 扩容操作 -> 死循环、数据丢失
+死循环：转移元素使用的是头插法。链表的顺序会翻转，这是形成死循环的关键点。
+头插法：
+[1]-a-b-null
+-------------
+[1]-null
+[2]-b-a-null
+
+
+线程1 
+[1]-b-null（取出了a，但是还没来得及丢到[2]，就挂起了）
+[2]-null
+线程2 
+[1]-null
+[2]-b-a-null（线程2又扩容了，并且走完扩容逻辑了，然后挂起）
+线程1
+[1]-null
+[2]-a-b-a（把之前取出来的a，b.next = a。 a-b-a形成了死循环）
+
+
+1.8 put操作 -> 数据覆盖
+扩容操作，转移元素使用的是尾插法。不会出现1.7的死循环。
+
+线程A和线程B同时进行put操作，刚好这两条不同的数据hash值算出来的数组下标一样。并且该位置数据为null，所以这线程A、B都会往这下标插入数据。
+假设一种情况，线程A进入后还未进行数据插入时挂起，而线程B正常执行正常插入数据，然后线程A恢复继续插入。问题出现：线程A会覆盖线程B的数据。
+
+尾插法：
+[1]-a-b-null
+-------------
+[1]-null
+[2]-a-b-null
+```
+
+
+
+##### HashMap能不能用二维数组实现？
+
+```java
+能。二维数组就是相当于数组+数组。而Hashmap实现是数组+链表。这里可以把链表替换成数组。
+数组访问速度是O(1)，链表是O(N)。二维数组在查询速度上完胜。
+
+但是会有以下的问题：
+1、浪费空间。大多数情况下hash表并不存在大量冲突，二维数组会浪费内存。
+2、动态扩容麻烦。二维需要考虑到两个数组的扩容问题。
+3、二次散列。第二维的那个数组要用到O(1)的速度就必须要给value值进行散列。散列又会出现冲突问题，valueA散列出2，valueB也散列出2，导致冲突。解决方法就只能用开放寻地发。
+   如果不想二次散列，就只能跟老老实实用O(N)速度，一个个遍历了。
+```
+
+
+
+##### 说说LinkedHashMap（HashMap + 双向链表）特点：有序的
+
+```java
+在HashMap的基础上（继承自HashMap），多维护了一个双向链表，用来保证元素的有序性。
+
+关键属性：
+Entry<K,V> header; //头结点（双向链表的入口）
+boolean accessOrder; //false插入顺序，true访问顺序，也就是访问次数.
+
+元素类继承自HashMap.Entry<K,V>
+并且扩展了before、after
+	Entry<K, V> before;
+	NEtry<K, V> after;
+before、after是用于维护Entry插入的先后顺序的。正是before、after和head的存在，才形成了双向链表
+
+1、重写了init方法，为header进行初始化。（在HashMap构造函数中调用了这个init方法）
+header中hash值为-1，其他都为null，before、after指向自己，header不在数组table中的。head的目的就是为了记录第一个插入的元素。
+
+2、并没有重写HashMap的put方法，而是只重写了put方法逻辑中调用的子方法addEntry()和createEntry()
+数据插入逻辑也是使用HashMap的逻辑。
+addEntry()和createEntry()目的是为了将插入后元素的before、after，与header绑定在一起，形成双链表。
+
+3、重写了HashMap的get方法
+通过HashMap的get方法拿到数据之后，会判断accessOrder标志位。
+如果accessOrder为true，将该元素转移到双向链表的尾部（实现访问顺序）
+public V getOrDefault(Object key, V defaultValue) {
+       Node<K,V> e;
+       if ((e = getNode(hash(key), key)) == null)
+           return defaultValue;
+       if (accessOrder)
+           afterNodeAccess(e);
+       return e.value;
+   }
+
+4、迭代器LinkedHashIterator，遍历的是双向链表。拿到head，从head开始遍历
+```
+
+
+
+
+
+
+
+##### 说说Android的SparseArray
+
+```java
+SparseArray系列（SparseArray，SparseBooleanArray，SparseIntArray，SparseLongArray，LongSparseArray）
+HashMap -> key - 泛型，value - 泛型
+SparseArray -> key - int，value - Object
+SparseArray在使用上受到了很大的约束嘛，这样约束的意义何在呢？
+
+SparseArray中的优秀设计：
+延迟删除机制（删除设置“标志位”，来延迟删除，实现数据位的复用）；
+二分查找的返回值处理；
+在空间不足时，利用gc函数一次性压缩空间，提高效率。
+
+属性：
+private static final Object DELETED = new Object(); //删除标志位
+private boolean mGarbage = false; //是否垃圾回收
+private int[] mKeys; //升序数组
+private Object[] mValues;
+
+添加：
+	public void append(int key, E value) {
+        if (mSize != 0 && key <= mKeys[mSize - 1]) {
+        	//当mSize不为0并且不大于mKeys数组中的最大值时,因为mKeys是一个升序数组，最大值即为mKeys[mSize-1]
+	        //直接执行put方法，否则继续向下执行
+            put(key, value);
+            return;
+        }
+
+		//当垃圾回收标志mGarbage为true并且当前元素已经占满整个数组，执行gc进行空间压缩
+        if (mGarbage && mSize >= mKeys.length) {
+            gc();
+        }
+
+        //当数组为空，或者key值大于当前mKeys数组最大值的时候，在数组最后一个位置插入元素。
+        mKeys = GrowingArrayUtils.append(mKeys, mSize, key);
+        mValues = GrowingArrayUtils.append(mValues, mSize, value);
+        mSize++;
+    }
+
+    public void put(int key, E value) {
+        int i = ContainerHelpers.binarySearch(mKeys, mSize, key); //二分查找
+        if (i >= 0) { //查找到
+            mValues[i] = value;
+        } else { //没有查找到
+            i = ~i; //取反，拿到要插入的下标。
+            if (i < mSize && mValues[i] == DELETED) { //元素要添加的位置正好==DELETED，直接覆盖它的值即可。
+                mKeys[i] = key;
+                mValues[i] = value;
+                return;
+            }
+			//垃圾回收，但是空间压缩后，mValues数组和mKeys数组元素有变化，需要重新计算插入的位置
+            if (mGarbage && mSize >= mKeys.length) {
+                gc();
+
+                //重新计算插入的位置
+                i = ~ContainerHelpers.binarySearch(mKeys, mSize, key);
+            }
+			//在i位置插入元素
+            mKeys = GrowingArrayUtils.insert(mKeys, mSize, i, key);
+            mValues = GrowingArrayUtils.insert(mValues, mSize, i, value);
+            mSize++;
+        }
+    }
+
+    //ContainerHelpers#binarySearch
+    static int binarySearch(int[] array, int size, int value) {
+        int lo = 0;
+        int hi = size - 1;
+
+        while (lo <= hi) {
+            final int mid = (lo + hi) >>> 1;
+            final int midVal = array[mid];
+
+            if (midVal < value) {
+                lo = mid + 1;
+            } else if (midVal > value) {
+                hi = mid - 1;
+            } else {
+                return mid; // 找到了
+            }
+        }
+        //没找到，直接取反然后返回。
+        //取反就变成负数了，外部只需要判断大于0就能够知道找没找到了
+        //然后外部还可以再取反拿回没命中的这个下标位置，这个下标位置就是将要插入数据的位置。
+        return ~lo;
+    }
+
+    例子：
+	假设我们有个数组 3 4 6 7 8。用二分查找来查找元素5
+	初始：lo=0 hi=4
+	第一次循环：mid=(lo+hi)/2=2 2位置对应6 6>5 查找失败，下一轮循环 lo=0 hi=1
+	第二次循环：mid=(lo+hi)/2=0 0位置对应3 3<5 查找失败，下一轮循环 lo=2 hi=1
+	lo>hi 循环终止
+	最终 lo=2 即5需要插入的下标位置
+
+
+    //GrowingArrayUtils#insert 把目标下标后面的元素后移，再插入元素。（如果容量不够会进行动态库容）
+    public static int[] insert(int[] array, int currentSize, int index, int element) {
+        if (currentSize + 1 <= array.length) {//如果数组长度能够容下直接在原数组上插入
+        	//调用了Java 的native方法，把array 从index开始的数复制到index+1上，
+        	//复制长度是currentSize - index
+            System.arraycopy(array, index, array, index + 1, currentSize - index);
+            //空出来的那个位置直接放入我们要存入的值，
+            //也不是空出来，其实index上还是有数的，
+            // 比如：{2,3,4,5,0,0}从index=1开始复制，复制长度为5，复制后的结果就是{2,3,3,4,5,0}了
+            array[index] = element;
+            return array;
+        }
+
+		//这就是扩容了，新建了一个数组，长度*2
+        int[] newArray = new int[growSize(currentSize)]; 
+        
+        //新旧数组拷贝，先拷贝最佳位置之前的到新数组
+        System.arraycopy(array, 0, newArray, 0, index);
+        
+        newArray[index] = element;//直接在新数组上赋值
+        //然后拷贝旧数组最佳位置index起的所有数到新数组里面，
+        //只是做了分段拷贝而已
+        System.arraycopy(array, index, newArray, index + 1, array.length - index);
+        
+        return newArray;
+    }
+
+
+查找：二分查找，找到了返回value给你。没找到返回你自己传的notFoundValue。
+	public E get(int key, E valueIfKeyNotFound) {
+        int i = ContainerHelpers.binarySearch(mKeys, mSize, key);
+
+        if (i < 0 || mValues[i] == DELETED) {
+            return valueIfKeyNotFound;
+        } else {
+            return (E) mValues[i];
+        }
+    }
+
+删除：没有实际删除，size值也不改？？？？？
+	public void delete(int key) {
+        int i = ContainerHelpers.binarySearch(mKeys, mSize, key);
+
+        if (i >= 0) {
+            if (mValues[i] != DELETED) { //直接替换成DELETED对象
+                mValues[i] = DELETED;
+                mGarbage = true; //开启回收标志位
+            }
+        }
+    }
+
+获取大小：先触发gc一次，再返回size值，没毛病
+	public int size() {
+        if (mGarbage) {
+            gc();
+        }
+
+        return mSize;
+    }
+
+
+gc方法：快慢指针思想，将DELETED元素排挤出数组。
+    private void gc() {
+        int n = mSize;//压缩前数组的容量
+        int o = 0;//压缩后数组的容量，初始为0
+        int[] keys = mKeys;//保存新的key值的数组
+        Object[] values = mValues;//保存新的value值的数组
+
+        for (int i = 0; i < n; i++) {
+            Object val = values[i];
+            if (val != DELETED) {//如果该value值不为DELETED，也就是没有被打上“删除”的标签
+                if (i != o) {//如果前面已经有元素打上“删除”的标签，那么 i 才会不等于 o
+	                //将 i 位置的元素向前移动到 o 处,这样做最终会让所有的非DELETED元素连续紧挨在数组前面
+                    keys[o] = keys[i];
+                    values[o] = val;
+                    values[i] = null;//释放空间
+                }
+                o++;
+            }
+        }
+        mGarbage = false; //恢复垃圾回收标志位
+        mSize = o; //更新size值，回收之后数组的大小
+    }
+```
+
+
+
+
+
