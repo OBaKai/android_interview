@@ -3217,6 +3217,80 @@ events日志获取：adb logcat -b events
 
 ## 其他
 
+### 进程优先级 - ADJ
+
+```java
+adj级别：进程优先级
+NATIVE_ADJ				-1000		native进程（init进程fork出来的native进程）
+SYSTEM_ADJ				-900		仅指system_server进程
+PERSISTENT_PROC_ADJ		-800		系统进程（系统签名的应用，系统进程一般不会被杀即便被杀或者发生Crash系统会立即重新拉起）
+PERSISTENT_SERVICE_ADJ	-700		关联着系统或关联persistent进程
+FOREGROUND_APP_ADJ		0			前台进程（获得焦点）
+VISIBLE_APP_ADJ			100			可见进程（失去焦点，但还可见）
+PERCEPTIBLE_APP_ADJ		200			可感知进程（有前台service在运行，比如后台播放音乐）
+BACKUP_APP_ADJ			300			备份进程
+HEAVY_WEIGHT_APP_ADJ	400			重量级进程
+SERVICE_ADJ				500			服务进程
+HOME_APP_ADJ			600			Home进程（launcher）
+PREVIOUS_APP_ADJ		700			上一个进程（在后台并且在最近任务栈顶的进程）
+SERVICE_B_ADJ			800			B List中的Service
+CACHED_APP_MIN_ADJ		900			不可见进程的adj最小值
+CACHED_APP_MAX_ADJ		906			不可见进程的adj最大值
+
+测试：
+app在前台->0
+app在前台，带个前台服务->0
+app在后台->700（最近使用的进程）
+app在后台，带个前台服务->50（0-100之间，可见进程）
+app在后台，点开好几个app->900（危，第一个杀的就是你）
+
+四大组件状态改变时会同步更新相应进程的adj优先级。当同进程有多个决定其优先级的组件时，取优先级最高的adj作为最终的adj。
+
+
+LowMemoryKiller：防止物理内存剩余过低，当物理内存剩余到达阈值，就会根据adj将进程回收。
+Memory		adj
+332mb 	->  900+
+221mb 	->  900
+129mb 	->  300
+110mb 	->  200
+92 mb 	->  100
+73 mb 	->  0
+不用设备阈值可能不一样，当adj相同的情况下占内存大的进程会被优先回收。
+
+跟adj相关的建议：
+1、UI进程与Service进程一定要分离，因为对于包含activity的service进程，一旦进入后台就成为”cch-started-ui-services”类型的cache进程(ADJ>=900)，随时可能会被系统回收；而分离后的Service进程服务属于SERVICE_ADJ(500)，被杀的可能性相对较小。尤其是系统允许自启动的服务进程必须做UI分离，避免消耗系统较大内存。
+2、只有真正需要用户可感知的应用，才调用startForegroundService()方法来启动前台服务，此时ADJ=PERCEPTIBLE_APP_ADJ(200)，常驻内存，并且会在通知栏常驻通知提醒用户，比如音乐播放，地图导航。切勿为了常驻而滥用前台服务，这会严重影响用户体验。
+3、进程中的Service工作完成后，务必主动调用stopService或stopSelf来停止服务，避免占据内存，浪费系统资源；
+4、不要长时间绑定其他进程的service或者provider，每次使用完成后应立刻释放，避免其他进程常驻于内存；
+5、APP应该实现接口onTrimMemory()和onLowMemory()，根据TrimLevel适当地将非必须内存在回调方法中加以释放。当系统内存紧张时会回调该接口，减少系统卡顿与杀进程频次。
+6、减少在保活上花心思，更应该在优化内存上下功夫，因为在相同ADJ级别的情况下，系统会选择优先杀内存占用的进程。
+
+
+系统内存不足：系统内存直接就是物理内存了，当物理内存不足LMK根据进程adj等级来回收，如果严重不足可能连前台进程都杀。
+    在内核层直接查杀进程，不会在Framework层还跟你叨逼叨看回收哪个Activity。
+应用内存不足：使用的虚拟内存大于总的四分之三，并且如果如果此进程ActivityTask数>=3，会对不可见Task进行回收，每次回收1个Task。
+ActivityThread#main -> ActivityThread#attach -> BinderInternal#addGcWatcher
+
+//监听每次GC，GC完后都会走一次这Runnable
+BinderInternal.addGcWatcher(new Runnable() {
+                @Override public void run() {
+                    ...
+                    Runtime runtime = Runtime.getRuntime();
+                    long dalvikMax = runtime.maxMemory();
+                    long dalvikUsed = runtime.totalMemory() - runtime.freeMemory();
+                    if (dalvikUsed > ((3*dalvikMax)/4)) { //已用内存 > 3/4最大内存
+                        ...
+                        try {
+                            //如果此进程ActivityTask数>=3，会对不可见Task进行回收，每次回收1个Task。
+                            mgr.releaseSomeActivities(mAppThread);
+                        } catch (RemoteException e) { throw e.rethrowFromSystemServer(); }
+                    }
+                }
+            });
+```
+
+
+
 ### 数据存储
 
 1. SharedPreference能多进程访问吗？进程间数据共享有什么方式？

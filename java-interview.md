@@ -678,6 +678,105 @@ public V getOrDefault(Object key, V defaultValue) {
 
 
 
+##### 说说ConcurrentHashMap的原理
+
+```java
+JDK1.7 Segment（ReentrantLock）+ HashEntry
+ConcurrentHashMap维护着一个Segment对象数组。
+一个Segment就相当于一个HashMap。Segment里包含一个HashEntry数组，每个数组元素能链成一条链表。
+
+采取锁分段技术，每一个Segment就好比一个自治区，读写操作高度自治，Segment之间互不影响。
+case1 不同Segment的并发写入【可以并发执行】
+case2 同一Segment的一写一读【可以并发执行】
+case3 同一Segment的并发写入【会上锁，保证一个线程操作，其他线程等待】
+由此可见，当中每个Segment各自持有一把锁（Segment继承自ReentrantLock）。在保证线程安全的同时降低了锁的粒度，让并发操作效率更高。
+
+Get方法：
+为输入的Key做Hash运算，得到hash值。
+通过hash值，定位到对应的Segment对象。
+再次通过hash值，定位到 Segment 当中数组的具体位置。
+
+Put方法：
+为输入的Key做Hash运算，得到hash值。
+通过hash值，定位到对应的Segment对象。
+获取可重入锁
+再次通过hash值，定位到Segment当中数组的具体位置。
+插入或覆盖HashEntry对象。
+释放锁
+
+读写时均需要二次散列。首先定位到Segment，之后定位到Segment内的具体数组下标。
+
+Size方法：每个Segment都各自加锁，那么在调用size()的时候，怎么解决一致性的？
+遍历所有的Segment。
+把Segment的元素数量累加起来。
+把Segment的修改次数累加起来。
+判断所有Segment的总修改次数是否大于上一次的总修改次数。如果大于，说明统计过程中有修改重新统计尝试次数+1；如果不是，说明没有修改统计结束。
+如果尝试次数超过阈值，则对每一个Segment加锁，再重新统计。
+再次判断所有Segment的总修改次数是否大于上一次的总修改次数。由于已经加锁，次数一定和上次相等。
+释放锁，统计结束。
+
+乐观锁 + 悲观锁：乐观地认为Size过程中不会有修改。当尝试多次次数，才无奈转为悲观，锁住所有Segment保证强一致性。
+
+================================================
+
+JDK1.8 Synchronized + CAS + Node（锁的粒度更小）
+
+//sizeCtl变量：chm内部数组的状态
+//0：sizeCtl为0，代表数组未初始化
+//正数：该值代表当前数组的阈值（跟hashmap的一样，capacity*loadFactor）
+//-1：代表数组正在初始化
+//负数且不是-1：代表数组正在扩容，该数为-(n+1)，表示当前有n个线程在共同完成扩容操作
+private transient volatile int sizeCtl;
+
+//baseCount +  CounterCell[]是用来统计size的
+private transient volatile CounterCell[] counterCells;
+private transient volatile long baseCount;
+
+//存储K,V数据
+transient volatile Node<K,V>[] table;
+
+Get方法：
+1、计算hash值定位到table下标位置，如果是首节点符合就返回
+2、如果遇到扩容的时候，会调用标志正在扩容节点ForwardingNode的find方法，查找该节点，匹配就返回
+3、以上都不符合的话，就往下遍历节点，匹配就返回，否则最后就返回null
+
+
+Put方法：初始化操作并不是在构造函数实现的而是在put操作中实现。
+进行自旋（死循环）：1-5步骤
+1、如果table为就先调用initTable()来进行初始化（懒初始化）
+	如果其他线程正在初始化（sizeCtl<0），那么调用Thread.yield()挂起当前线程，等其他线程执行完后再继续工作。
+2、如果没有hash冲突就直接CAS插入（table被volatile修饰，可以保证可见性）
+3、如果还在进行扩容操作就先进行扩容
+	走helpTransfer()方法，没有加锁或者挂起线程操作。利用多个线程一起帮助进行扩容提高扩容效率，而不是只有检查到要扩容的线程进行扩容。
+4、如果存在hash冲突，就加锁这个元素（synchronized）来保证线程安全。
+	链表形式就直接遍历到尾端插入。
+	红黑树就按照红黑树结构插入。
+5、最后一个如果该链表的数量大于阈值8，就要先转换成黑红树的结构，break再一次进入循环;
+
+6、如果添加成功就调用addCount()方法统计size，并且检查是否需要扩容。
+
+Size方法：baseCount +  CounterCell[]里所有value值
+在扩容和addCount()方法就已经把baseCount、CounterCell[]处理好了，Put方法里就有addCount()。
+
+
+addCount()方法解析：更新baseCount、CounterCell[]
+多个线程进行put，要进行size++操作。那么是不是用一个原子类就完事了？ 不，这样太慢了。需要一个线程累加完才到下一个。
+baseCount + CounterCell[]，先尝试对baseCount进行CAS，成功就更新了baseCount值。
+如果累加baseCount失败，那么直接在CounterCell[]，拿到当前线程的hashcode运算出下标，给下标做累加。
+这样就能实现多线程累加了。
+
+transfer()方法解析：利用多个线程一起进行扩容
+ForwardingNode：一个特殊的Node节点，hash值为-1，其中存储nextTable的引用。
+只有table发生扩容的时候，才会发挥作用，作为一个占位符放在table中表示当前节点为null或则已经被移动。
+
+节点从table移动到nextTable，大体思想是遍历、复制的过程：
+
+首先根据运算得到需要遍历的次数i，然后利用tabAt方法获得i位置的元素f，初始化一个forwardNode实例fwd。
+如果f == null，则在table中的i位置放入fwd，这个过程是采用Unsafe.compareAndSwapObjectf方法实现的，很巧妙的实现了节点的并发移动。
+如果f是链表的头节点，就构造一个反序链表，把他们分别放在nextTable的i和i+n的位置上，移动完成，采用Unsafe.putObjectVolatile方法给table原位置赋值fwd。
+如果f是TreeBin节点，也做一个反序处理，并判断是否需要untreeify，把处理的结果分别放在nextTable的i和i+n的位置上，移动完成，同样采用Unsafe.putObjectVolatile方法给table原位置赋值fwd。
+```
+
 
 
 
@@ -694,7 +793,12 @@ SparseArray中的优秀设计：
 延迟删除机制（删除设置“标志位”，来延迟删除，实现数据位的复用）；
 二分查找的返回值处理；
 在空间不足时，利用gc函数一次性压缩空间，提高效率。
+  
+SparseArray应用场景：
+1、数据量不大，最好在千级以内（数据量大的情况下性能并不明显，将降低至少50%）
+2、key必须为int类型，这中情况下的HashMap可以用SparseArray代替
 
+SparseArray原理分析：
 属性：
 private static final Object DELETED = new Object(); //删除标志位
 private boolean mGarbage = false; //是否垃圾回收
@@ -864,6 +968,16 @@ gc方法：快慢指针思想，将DELETED元素排挤出数组。
 ```
 
 
+
+##### 说说Android的ArrayMap<K, V>
+
+```java
+ArrayMap内部跟SparseArray一样也是使用两个数组进行数据存储。一个数组记录key的hash值，另外一个数组记录Value值。
+它和SparseArray一样，也会对key使用二分法进行从小到大排序，在添加、删除、查找数据的时候都是先使用二分查找法得到相应的index，然后通过index来进行添加、查找、删除等操作，所以，应用场景和SparseArray的一样。
+  
+ArrayMap应用场景：
+1、数据量不大，最好在千级以内（数据量大的情况下性能并不明显，将降低至少50%）
+```
 
 
 
