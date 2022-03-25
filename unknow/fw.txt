@@ -1,0 +1,67 @@
+SystemServer（zygote fork出来的第一个进程）
+
+SystemServer作用：启动以及维护系统中的服务，将启动后的服务注册到ServiceManager。
+
+启动大部分系统服务，并将这些服务注册到ServerManager中，从而让ServerManager管理这些服务。
+WMS，AMS，PMS等可以用binder通信的服务都运行在SystemServer中的。并且WMS，AMS这些重要、使用繁忙的服务是单独一个线程的。
+而有些没有繁重的服务，是直接运行在SystemServer的主线程中的。
+
+
+SystemServiceManager（在SystemServer进程被new出来的。）
+//管理的所有继承SystemService的类的集合
+private final ArrayList<SystemService> mServices = new ArrayList<SystemService>();
+
+//通过className，反射创建出对应的SystemService（系统服务都是基础子SystemService）
+//将创建好的SystemService缓存到mServices列表中
+//再调用SystemService的onStart方法。
+public SystemService startService(String className) {...}
+
+SystemServiceManager作用：用于管理、启动SystemServer进程内的系统服务。
+
+
+
+
+
+ServiceManager（独立进程（servicemanager.rc）。android7-是由init进程启动，android7+是单独启动的）
+
+ServiceManager作用：
+1、Binder进程间通信机制的核心组件之一，它扮演着Binder进程间通信机制上下文管理者的角色。
+2、同时负责管理系统中的系统服务，应用想要跟系统服务通信，都需要向ServiceManager获取系统服务代理对象。
+
+main函数：打开Binder；把自己注册为Binder管理者；进入loop监听使用svcmgr_handler来处理应用请求。
+
+
+
+
+
+
+
+
+
+DisplayEventReceiver
+
+long nativeInit(new WeakReference<DisplayEventReceiver>(this), mMessageQueue, vsyncSource, configChanged)
+1、通过java层的MessageQueue对象，拿到native层的MessageQueue对象
+2、创建NativeDisplayEventReceiver对象，在构造函数中会跟SurfaceFlinger建立binder连接，然后SurfaceFlinger会传递一个BitTube对象过来，BitTube对象里边携带有一个读事件的fd。
+3、调用NativeDisplayEventReceiver对象的initialize函数，将读事件的fd添加到looper的epoll里边进行监听
+4、返回NativeDisplayEventReceiver对象地址给java层
+
+
+
+
+
+void nativeScheduleVsync(receiverPtr)
+1、拿到NativeDisplayEventReceiver对象，调用scheduleVsync函数
+2、mEventConnection调用requestNextVsync函数（mEventConnection是与SurfaceFlinger建立连接的binder对象）
+3、SurfaceFlinger将一个count值设置为0（等到发送玩vsync，count又会设置为-1），并且执行唤醒线程，然后将vsync信号写入到BitTube对象的写fd（那么应用进程的读fd就会收到）
+		// count >= 1 : continuous event. count is the vsync rate 多次发送
+        // count == 0 : one-shot event that has not fired    单次发送
+        // count ==-1 : one-shot event that fired this round / disabled 不发送
+
+
+应用进程接收VSync
+1、在looper.addFd的时候传入了一个callback参数（NativeDisplayEventReceiver对象本身），然后被包装成SimpleLooperCallback
+2、当epoll处理监听到fd之后，就会调到SimpleLooperCallback#handleEvent。
+3、最终会调到NativeDisplayEventReceiver#handleEvent
+4、从fd中读取出vsync时间戳、id、frame等信息，然后反调用java层的DisplayEventReceiver#dispatchVsync 以及 DisplayEventReceiver#dispatchHotplug 将vsync分发到上层。
+

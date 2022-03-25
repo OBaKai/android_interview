@@ -1,0 +1,231 @@
+消息队列创建相关问题====================================
+
+可以在子线程创建Handler吗？
+可以，但是前提是这个线程的Looper是已经创建的（已经调用了 Looper#prepare）
+
+Handler在创建的时候，如果没有指定Looper的情况下，默认是获取当前线程的Looper。如果获取不到就抛异常。
+Looper是线程唯一的（ThreadLocalMap保证），每个线程只有一个Looper。 
+
+
+
+
+主线程Looper跟子线程Looper的区别？
+prepare(quitAllowed) 这个标志位是否允许Looper退出
+
+主线程Looper不允许退出，子线程Looper允许退出。
+主线程是prepareMainLooper -> prepare(false) 
+子线程是prepare -> prepare(true) 
+
+
+
+
+Handler、Looper、MessageQueue的区别？
+一个线程对应着一个Looper，Looper里边维护着一个MessageQueue。 
+Handler创建多少个都没关系，只要与对应线程的Looper绑定，就能往该线程的消息队列里边发送消息了。
+
+寄快递的例子：
+寄件人（Handler），选择了某个快递公司（Looper）进行寄包裹（Message）。
+快递公司就会把包裹放到自家的仓库（MessageQueue）中进行分，然后根据寄件信息分发到对应的目的地（Message#target）。
+
+
+
+
+
+MessageQueue是怎么创建的？ 
+Looper#prepare 
+	创建java层MessageQueue
+	nativeInit
+		创建native层MessageQueue
+			创建native层Looper（也是线程唯一）
+
+native#Looper构造函数
+	创建eventfd，将返回的fd（wakeEventFd）记录起来
+	创建epoll，然后监听wakeEventFd的读事件
+
+
+
+消息队列消息传递相关问题====================================
+
+消息循环过程是怎么样的？
+Looper#loop
+	死循环
+	调用MessageQueue#next 拿消息（消息队列为空会一直阻塞在这个方法，如果返回null证明是想要退出消息循环了）
+	如果msg为空，就会退出循环（Looper结束了）
+	如果msg不为空，msg.target.dispatchMessage(msg) 处理消息（target就是发送消息的那个handler对象）
+
+MessageQueue#next
+	死循环 
+	调用nativePollOnce(timeout)（会阻塞（0：立即返回，-1：一直阻塞，>0：阻塞时长），当有新msg消息 或者 阻塞超时了 就会被唤醒返回）
+	从消息队列的中取出头msg，如果msg为空设置timeout=-1（这样会又走nativePollOnce一直阻塞，知道有新消息进入）
+	如果需要msg的消息，还没到执行时间，就会算出等待时长，设置给timeout（这样会又走nativePollOnce进入阻塞）
+
+nativePollOnce
+	native#MessageQueue#pollOnce -> native#Looper#pollOnce 
+		死循环
+		调用native#Looper#pollInner
+			epoll_wait等待监听的fd触发事件，如果有事件触发，就会处理对应fd的事件
+				如果fd是wakeEventFd并且是读事件，就调用awoken函数（消化掉事件）
+
+
+
+
+
+消息是怎么发送的？
+sendMessage -> sendMessgaeDelayed(0) -> sendMessgaeAtTime（时间戳 + delay时长）
+	将msg加入到消息队列
+	nativeWake 唤醒消息队列所在的线程
+
+nativeWake
+	native#MessageQueue#wake -> native#Looper#wake
+	native#Looper#wake
+		往wakeEventFd写入1
+
+
+
+
+消息怎么处理？
+在创建Message的时候，会记录当前发送的handler对象到target变量中
+当消息队列拿到该Message进行处理的时候，就会调用target.dispatchMessage
+
+Handler#dispatchMessage(msg)
+	如果msg.callback不为空，就执行msg.callback（callback是个Runnable，在handler.post(runnable)的时候传入）
+	如果mCallback不为空，就执行mCallback.handleMessage(msg) (在创建Handler对象的时候可以传入自己实现的Callback，就是这个mCallback)
+		mCallback.handleMessage是有返回值的，如果返回true，就直接返回了，不会走handleMessage。
+	最后才会执行handleMessage方法（我们平时复写的方法）
+
+一般做Handler Hook的时候，就会反射Handler#mCallback，传入自己的Callback并且返回true，拦截掉这个Handler的消息。
+
+
+
+消息延时怎么实现的？延时发送还是延时处理？延时精度怎么样？
+sendMessgaeDelayed(100) -> sendMessgaeAtTime（时间戳+delay时长：在这个目标时间才去处理这个消息）延时处理！！！
+
+消息插入消息队列：消息队列是按照触发时间排序的，头msg是最先执行的。
+	根据目标发送时间，插入到队列中（发送来了就马上插入的，需要等到执行时间才会取出来）
+
+延时实现：入队按照执行时间排序msg；没到执行时间计算等到时长，设置给epoll_wait进入等待；
+
+延时精度：并不是非常精确的
+① 等待时间是通过计算后，然后让epoll_wait去休眠休眠这个时长实现的。
+② 如果前边有msg执行耗时了，可能会导致这个延时消息到了执行时间了，但是还没轮到它执行。
+
+
+
+说说IdleHandler？（触发逻辑：消息队列为空 或者 第一条执行的消息还没到）
+使用：IdleHandler是个接口，唯一方法IdleHandler#queueIdle（返回值：ture：一直生效，false：一次性，用完就被删了）
+	 添加方法：Looper#addIdleHandler
+
+原理：
+Looper#addIdleHandler：将IdleHandler加入到一个IdleHandler缓存列表里边
+
+MessageQueue#next（本次循环拿到的msg为空，或者 msg是个延时消息而且还没到指定的触发时间，那么就认定当前的队列为空闲状态）
+	nativePollOnce(timeout)被唤醒了
+	当前有要执行的msg直接返回了。
+	如果没有要执行的msg，那待会nativePollOnce又是要进入等待了。这时候就证明消息队列会有一段空闲的时间，那么看看IdleHandler缓存列表有没有IdleHandler，有就执行。
+	执行IdleHandler，如果返回值false，执行完就从IdleHandler缓存列表中移除。
+
+
+使用场景：
+Framework中使用场景：
+① Activity#onResume里边设置IdleHandler去执行上一个Activity的onStop、onDestory
+② GcIdler：空闲的时候主动执行一次gc。地爱用时机：当AMS通知Activity#onResume 或 AMS发现内存就会叫app调用。
+③ waitForIdle：监听当前线程是否空闲（异步）
+	先addIdleHandler，然后在post一个空的Runnable到handler里边。
+	为啥还要post：有可能当前已经是在空闲的休眠中了，本次空闲也不能落下。
+
+	class Idle implements MessageQueue.IdleHandler{
+        private final Runnable runnable;
+
+        public Idle(Runnable r){ runnable = r; }
+
+        @Override
+        public boolean queueIdle() {
+            if (runnable != null) runnable.run();
+            return false;
+        }
+    }
+
+ 	public void waitForIdle(Runnable r){
+        handler.getLooper().getQueue().addIdleHandler(new Idle(r));
+        handler.post(new EmptyRunnable());
+    }
+
+
+④ waitForIdleSync：监听当前线程是否空闲（同步）
+	class Idle implements MessageQueue.IdleHandler{
+        private boolean isIdle;
+
+        public synchronized void waitForIdle(){
+            try {
+                while (!isIdle) wait();
+            } catch (InterruptedException e) { e.printStackTrace(); }
+        }
+
+        @Override
+        public boolean queueIdle() {
+            synchronized (this){
+                isIdle = true;
+                notifyAll();
+            }
+            return false;
+        }
+    }
+
+	public void waitForIdleSync(){
+        Idle idle = new Idle();
+        handler.getLooper().getQueue().addIdleHandler(idle);
+        handler.post(new EmptyRunnable());
+        idle.waitForIdle();
+    }
+
+app中使用场景：
+延迟执行
+Activity启动优化：onCreate，onStart，onResume中耗时较短但非必要的代码可以放到IdleHandler中执行，减少启动时间
+
+批量任务（任务密集，并且只关注最终结果）
+后台不断地推送消息过来，我们可以封装到一个工作线程里边接收并且处理。当工作线程空闲下来的时候，就汇总结果然后刷新界面。
+
+其他
+想要在一个View绘制完成之后添加其他依赖于这个View的View，当然这个用View#post()也能实现，区别就是前者会在消息队列空闲时执行
+发送一个返回true的IdleHandler，在里面让某个View不停闪烁，这样当用户发呆时就可以诱导用户点击这个View，这也是种很酷的操作
+
+
+
+消息屏障 与 IdleHandler
+插入一个消息屏障会触发IdleHandler吗？
+	不会，因为插入屏障的方法没有调用唤醒方法。
+移除一个消息屏障会触发IdleHandler吗？
+	不会，虽然移除屏障的时候会调唤醒方法，但是由于之前消息队列处理完最后一条消息之后调用了IdleHandler进入了休眠，现在又被你移除消息屏障唤醒了，再去检查消息队列还是空的，是不会走IdleHandler的。
+消息队列只有一个消息屏障，插入一条消息会走IdleHandler吗？
+	有可能，关键看屏障消息执行时间到了没有。插入一条消息处理完之后，检查屏障消息时间还没到，会走IdleHandler。
+
+
+
+
+说说Looper的副业？--- 让后Looper监听其他fd（文件、管道、socket都可以）
+
+//监听的fd；监听的事件类型是读事件、还是写事件；回调当触发了监听就会走这回调。
+MessageQueue#addOnFileDescriptorEventListener(FileDescriptor fd, int events, OnFileDescriptorEventListener listener)
+	-> native#MessageQueue#setFileDescriptorEvents -> native#Looper#addFd
+
+native#Looper#addFd(fd，event，callback，...)
+	往epoll里边添加fd监听，并且把callback包装到EventItem里边
+	当监听到该fd有对应事件变化，epoll_wait就会被唤醒，从对应的EventItem取出callback，然后调用。
+
+Framework里边的使用： 
+在java层没有用到，native层有用到。
+
+vsync机制：SurfaceFlinger通知应用进程有vsync信号来了，就是使用Looper的副业。
+Choreographer在native层的初始化的时候，给Looper注册了一个读的fd。
+fd是在SurfaceFlinger里边创建的（创建管道，有读fd，跟写fd），然后将读fd用binder传给了应用进程。
+当有vsync信号来的时候，SurfaceFlinger就写fd，然后应用进程的Looper的epoll被唤醒，执行回调。
+
+为什么不直接使用binder调用方式，而是选择fd监听的方式呢？
+SurfaceFlinger通知应用进程
+如果是binder调用的话，同步调用如果应用进程处理耗时，会卡SurfaceFlinger进程。
+如果是oneway的异步调用，那么应用进程就变成了同步的过程，binder驱动会等你执行完这个请求之后才会把下一个请求交给你。
+
+如果是fd监听的方式（对应简单而又频繁的消息通知，fd监控是比较高效的）
+应用端可以直接拿到所有的事件，先处理那个后处理哪个，完全由应用端控制。
+而且应用什么时候处理，在哪个线程处理都是比较好控制的。 
+

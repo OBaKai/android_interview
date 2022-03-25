@@ -1,0 +1,41 @@
+pipe
+① 半双工 - 两个fd（读fd与写fd）
+② 父子进程之间使用，父fork子，子就能拿到这两个fd与父通信
+例子：6.0- handler
+
+socket
+① 全双工 - 一个fd（既可读也可以写） 
+② 进程无需亲缘关系，知道路径就能连上
+例子：zygote
+
+mmap
+① 一个fd，一次拷贝
+② 进程无需亲缘关系
+例子：MemoryFile
+
+binder
+
+binder有什么好？
+1、性能好 - mmap（一次拷贝）
+2、使用简单
+binder用起来就像函数调用一样。
+mmap不方便使用，你要打开fd，定义结构体，并且结构体里边的变量长度需要固定。
+（之前遇到一个坑，就是因为结构体里边有string，导致数据读取异常。后面改用了char[125]这种固定长度的）
+3、安全
+socket ip地址开放，不安全
+mmap 文件路径开放，不安全
+主要是我们确认不了对方的身份信息。
+binder安全，是因为身份信息是在binder内核态中添加的，验证也是在内核态中验证的。
+
+应用进程如果启动binder？
+1、打开binder驱动 - binder驱动就会为这个进程创立一套档案
+2、将fd进行内存映射，分配缓存区
+3、启动binder线程 - 一方面将线程注册到binder驱动。另一方面进入loop循环不断跟binder驱动交互
+
+
+应用进程binder线程池
+1、binder线程池并非一个传统意义上的线程池结构，它在client进程中只有一个继承自Thread的PoolThread类。而线程的启动以及管理都是由binderDriver来控制的。
+2、binder线程有主线程和非主线程之分，主线程是启动的时候才会有的，每个binder线程池只有一个。其他情况下申请的都是非主线程。
+3、binder线程池启动的时候，实际上只是启动了client中的binder主线程。
+4、binder线程(非主线程)有两种情况启动：client进程向binderDriver发送IPC请求，以及 client进程向binderDriver回复IPC请求结果。
+5、binder线程池的默认大小是16，1个主线程和15个非主线程。

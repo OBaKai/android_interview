@@ -1,0 +1,113 @@
+面向切面编程  aop
+
+android中aop应用非常广泛
+LeakCanary
+Matrix
+Retrofit
+OkHttp -> 拦截器
+生命周期管理
+
+
+Retrofit（翻译：翻新、改型）
+Retrofit将请求转化为Okhttp网络请求，这个转化过程就是使用了aop思想。并且代码不多却使用了8种设计模式。
+
+
+Okhttp使用不方便的点：
+请求配置繁琐（请求头、body、请求参数等）；
+响应数据的解析过程需要手动完成，无法自动转换；
+需要手动切换线程；
+异步请求用到回调，容易陷入回调地狱。
+
+
+Retrofit设计任务：请求前 -> Okhttp -> 请求后
+请求前：统一配置请求头；一致适配请求。
+请求后：响应数据适配；线程切换。
+
+
+1、创建Retrofit对象。（建造者模式）
+建造者模式（builder模式）使用场景：创建的对象参数太多。（什么时候用：>5个参数 而且 有可选参数）
+mRetrofit = new Retrofit.Builder()
+                .client(mOkHttpClient)
+                .addConverterFactory(GsonConverterFactory.create(gson))
+                .addCallAdapterFactory(RxJava2CallAdapterFactory.create())
+                .baseUrl(baseUrl)
+                .build();
+
+2、所有操作都包装在了这个Retrofit对象里边实现，Retrofit对象是唯一入口。(外观模式)
+外观模式（门面模式）使用场景：
+
+
+3、Api api = mRetrofit.create(Api.class);
+运行时create()方法为我们动态实现了Api接口并创建了这个类对象，返回给我们。
+Proxy.newProxyInstance() -> 动态代理（代理模式）
+代理模式使用场景：
+
+public <T> T create(final Class<T> service) {
+    Utils.validateServiceInterface(service);
+    if (validateEagerly) {
+      eagerlyValidateMethods(service);
+    }
+    return (T) Proxy.newProxyInstance(service.getClassLoader(), new Class<?>[] { service },
+        new InvocationHandler() {
+          private final Platform platform = Platform.get();
+
+          @Override public Object invoke(Object proxy, Method method, @Nullable Object[] args)
+              throws Throwable {
+            // If the method is a method from Object then defer to normal invocation.
+            if (method.getDeclaringClass() == Object.class) {
+              return method.invoke(this, args);
+            }
+            if (platform.isDefaultMethod(method)) {
+              return platform.invokeDefaultMethod(method, service, proxy, args);
+            }
+            ServiceMethod<Object, Object> serviceMethod =
+                (ServiceMethod<Object, Object>) loadServiceMethod(method);
+            OkHttpCall<Object> okHttpCall = new OkHttpCall<>(serviceMethod, args);
+            return serviceMethod.callAdapter.adapt(okHttpCall);
+          }
+        });
+  }
+
+
+4、Retrofit可以封装到单例吗？- 不可以
+什么情况才会使用单例？防止对象频繁创建、频繁销毁（防止内存抖动，出现卡顿）
+但是使用了单例会拉长对象的生命周期，使用不当会内存泄漏。
+但是每一个接口方法Retrofit都会建造一个对应的ServiceMethod，并且缓存起来。
+如果使用每次都创建一个Retrofit的话，这个缓存就没多大意义了。每次都要都会创建ServiceMethod。
+
+5、ServiceMethod - 解析注解、解析方法信息
+这里用的是apt技术吗？并不是。apt：基于注解生成代码。
+
+
+
+
+
+public interface GitHub {
+    @GET("/github/haha")
+    Call<String> haha(@Query("uid") String uid);
+}
+
+GitHub github = retrofit.create(GitHub.class);
+
+retrofit.create(Class)：
+1 加载对应method的ServiceMethod实例（先从cache中查找，如果没有再创建）
+  ServiceMethod比较重要的成员变量：
+  okhttp3.Call.Factory callFactory; //负责网络请求的工程类对象（Retrofit.Builder中设置，默认OkHttpClient）
+  CallAdapter<?> callAdapter; //method自定义的Callback（Retrofit.Builder中设置，RxJava）
+  Converter<ResponseBody, T> responseConverter; //负责转化网络返回数据成method对应的Bean对象（Retrofit.Builder中设置，Gson）
+  ParameterHandler<?>[] parameterHandlers; //method参数的注解所生成的参数数组
+
+
+2 使用ServiceMethod对象和方法调用参数创建OkHttpCall
+  获取到method对应的ServiceMethod实例后，会使用该ServiceMethod实例和方法调用的参数Object... args生成一个OkHttpCall。而OkHttpCall实际上是okhttp3.Call的一个包装类，实际调用OkHttpCall的相关执行方法时最终是调用OkHttpCall内部用ServiceMethod.callFactory创建的okhttp3.Call来执行网络请求。
+
+3 serviceMethod.callAdapter.adapt(okHttpCall)来产生method所定义的返回(Call<T>或者其他自定义CallAdapter支持的返回)
+  Retrofit2默认支持的返回是返回一个Call<T>,利用此Call<T>实例可执行
+
+  Response<T> result = call.execute();//同步执行
+
+  //异步执行
+  call.enqueue(new Callback(){
+      public void onResponse(Call<T> call, Response<T> response){ }
+      public void onFailure(Call<T> call, Throwable t){ }   
+  });

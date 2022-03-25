@@ -1094,6 +1094,51 @@ FragmentPageAdapter：分离Fragment，但会缓存其实例
 
 
 ### View ✅
+##### 说说布局加载过程
+```java
+Activity#setContentView -> PhoneWindow#setContentView -> LayoutInflate#inflate（resId）
+
+inflate的两步操作：
+1、解析xml文件
+	Resources#getLayout -> Resources#loadXmlResourceParser
+	解析xml文件，IO操作。（耗时）
+2、填充View树
+	LayoutInflate#inflate（） -> LayoutInflate#createViewFromTag
+		如果有设置Factory2，Facory，则通过Factory2、Facory生成View；（Factory2只能设置一次，第二次设置就会抛异常）
+		如果没有设置，则通过默认方式（createView）生成View；
+		默认方式（createView）：遍历布局文件中每个标签，反射创建View实例，填入View树。
+
+	如果是AppCompatActivity，还会重写setContentView，通过AppCompatDelegate去篡改部分View。
+		AppCompatDelegateImpl：
+			解析xml：LayoutInflater#inflate（resId）解析xml
+			填充View树：实现了Factory2，取代默认方式。并且在createView中篡改部分View。
+				TextView -> AppCompatTextView，ImageView -> AppCompatImageView等等
+
+总结：
+解析xml文件是个IO操作，文件比较大会很耗时。
+填充View树的过程，是通过反射创建View实例的，反射创建对象性能不够高。
+
+
+统计界面布局耗时：
+基本方式：setContentView前后增加时间统计。
+	缺点：代码入侵性强；不能统一配置每个Activity都要加一次麻烦。
+AOP方式：使用AspectJ，hook所有的setContentView。
+
+
+优化方案：
+AsyncLayoutInflater：异步加载xml
+	原理：将resId加入到队列中，通过内部的一个线程解析xml，然后切换回主线程去填充View树。
+	缺点：队列限长10，频繁加载layout可能会出现入队阻塞；内部的AsyncLayoutInflater不支持设置Factory；单线程工作不一定满足需求。
+	解决：仿照AsyncLayoutInflater，自己写一个异步加载xml类。
+
+减少xml布局的嵌套层级，避免过度绘制。
+如果避免过度绘制
+移除window的背景：AppTheme都默认带会有windowBackground，如果我们不用，可以移除掉。
+减少给子控件设置背景。
+使用约束布局，减少布局嵌套。
+使用ViewStub来懒加载载View。（ViewStub是一个不可见的View类，当inflate或setVisible才会显示。当inflate View之后，ViewStub就会被移除。inflate只能用一次）
+等
+```
 
 ##### Activity、Window、DecorView的关系。+2
 

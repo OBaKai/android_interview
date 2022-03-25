@@ -1,0 +1,227 @@
+内存优化：内存抖动、内存泄漏、oom
+1、内存抖动：
+原因：频繁GC引起。
+现象：内存波动图形呈锯齿状；应用出现卡顿；出现内存碎片，容易引发OOM。
+Dalvik虚拟机尤为明显。ART虚拟机做了大量优化，内存分配和GC效率相比提升了5~10倍。出现内存抖动的概率会小很多。
+
+常见案例：
+1、字符串使用加号拼接（StringBuilder替代。初始化时设置容量，减少StringBuilder的扩容。）
+2、资源复用（使用全局缓存池，以重用频繁申请和释放的对象。结束后需手动释放池中的对象。）
+3、减少不合理的对象创建（onDraw、getView中创建的对象尽量进行复用；避免在循环中不断创建局部变量。）
+4、使用合理的数据结构（SparseArray类族、ArrayMap来替代 HashMap）
+
+
+2、内存泄漏：
+原因：对象被持有导致无法释放 或 不能按照对象正常的生命周期进行释放。
+现象：可用内存减少，容易引发OOM。
+
+    MemoryProfiler（as自带的）
+
+
+    LeakCanary（dump的分析会影响到主进程，主线程整个卡住）
+        1、监控触发时机：Activity.onDestroy时触发泄漏检测
+        2、dump 内存堆栈：Dump hprof是通过虚拟机提供的 API dumpHprofData 实现的，这个过程会“冻结”整个进程。
+        3、分析 hprof 文件
+        
+
+    Koom（提出了 fork dump 的概念，能在dump分析的时候而不影响到主进程）
+        1、监控触发时机：用阈值检测法来触发
+        2、dump 内存堆栈：
+        从主进程fork出一个子进程，由于linux的copy-on-write机制，子进程和父进程共享的是一块内存，那么我们就可以在子进程中进行 dump 堆栈，不影响主进程的运行。
+        ①调用 native 方法，挂起当前的主进程，并 for 出子进程，该挂起仅仅只是更改 ThreadList 变量的线程状态味 suspend，主要目的的欺骗子进程的 dump。
+        ②子进程开始 dump hprof 文件。
+        ③恢复挂起的主进程，也是更改 ThreadList 变量状态。
+        ④等待子进程退出，看到 issue #81 有人对这个等待过程提出了疑虑，作者也进行相应的解答，waitPid 只是暂停线程，而我们 dump 的过程是在 HandlerThread 进行的，所以并不影响主线程。
+
+        3、分析 hprof 文件
+        1、GC root 剪枝，由于我们搜索 Path to GC Root 时，是从 GC Root 自顶向下 BFS，如JavaFrame、MonitorUsed等此类 GC Root 可以直接剪枝。
+        2、基本类型、基本类型数组不搜索、不解析。
+        3、同类对象超过阈值时不再搜索。
+        4、增加预处理，缓存每个类的所有递归 super class，减少重复计算。
+        5、将object ID的类型从long修改为int，Android虚拟机的object ID大小只有32位，目前shark里使用的都是long来存储的，OOM时百万级对象的情况下，可以节省10M内存。
+
+
+
+2、oom
+原因：在内存中，无法申请到一块对应大小的连续内存导致的。
+现象：程序抛出OOM异常。
+
+OOM类型：
+java.lang.OutOfMemoryError: Could not allocate JNI Env
+fd申请失败：进程的fd耗尽（一般一个进程限制1024个fd   adb shell ulimit -a ）
+
+当前进程占用fd数：lsof | grep <进程号> | wc -l （需root）
+watch -n 2 'adb shell su lsof | grep <进程号> | wc -l'（watch命令定时监控）
+当前进程fd信息：ls -la proc/{pid}/fd/
+
+Android Fd泄漏问题分析：https://www.jianshu.com/p/befd4b86cc42
+
+
+java.lang.OutOfMemoryError: pthread_create (1040KB stack) failed: Try again
+开启线程失败：虚拟内存不足，无法开启线程（启动一个线程需要先分配1040KB（1024 + 8 + 8）虚拟内存，再去启动的）
+
+创建线程源码与OOM分析：https://blog.csdn.net/Tencent_Bugly/article/details/78542324
+
+
+内存优化量化：
+待机的情况下内存占用率
+重点模块的内存占用率
+OOM率 - bugly上报oom次数的统计
+GC次数
+
+
+
+
+
+
+
+（android5.0之前）Dalvik 垃圾回收机制：Mark-Sweep算法（标记-清除）：
+遍历一次堆地址空间，从对象的根集对象开始标记引用对象（Mark阶段），回收没有被标记的对象占用的内存（Sweep阶段）。
+缺点1：Mark阶段需要暂停应用线程两次，Sweep阶段需要暂停一次，三次的STW开销会带来卡顿。
+缺点2：堆空间中给较大的对象分配空间后会导致碎片化比较严重，并且可能会导致GC调用次数变多增加开销。
+
+（android5.0之后）ART垃圾回收机制：Concurrent Mark-Sweep算法（并发标记-清除）：
+优化1：消除了第一次遍历堆地址空间的停顿，和第二次标记根集对象的停顿，并缩短了第三次处理card table的停顿，因此大大的缩短了应用程序在执行时的卡顿时间。
+优化2：提出了LOS专门管理大对象的管理方法。
+
+除此以外，还提供了丰富的GC收集器，例如继承自mark sweep的sticky mark sweep和partial mark sweep，二者的回收力度都要比full mark sweep小，因此性能上也得到了一些提升。一般情况下的收集器的主力就是sticky mark sweep, 这是对应用程序的性能影响最小的一种方式，因此大多数情况的GC表现，都要比Dalvik的GC表现更好。
+
+
+
+三、界面流畅性优化：卡顿
+Systrace：android-sdk/platform-tools/systrace/systrace.py
+1、python systrace.py --time=10 -o report.html
+2、操作app 10s后，systrace生成一个HTML报告
+花费16.6ms以上渲染的帧用黄色或红色圆圈表示。点击一个圆圈，可查看详细报告。
+
+systrace是在系统级显示有关进程的信息，因此很难在报告中查看某个特定时间内，您的应用程序正在执行什么方法。
+
+代码中添加trace标记方法，并且命令需要加上 -a + 包名
+Trace.beginSection("xxx");
+...需要跟踪的代码
+Trace.endSection();
+
+也可以用TraceView（Systrace的图形工具）分析trace Log
+
+
+
+四、启动速度优化：冷启动、某场景的进入
+
+
+
+
+
+五、包体积优化：apk瘦身
+压缩、混淆资源文件
+移除无用的资源文件
+移除无用的依赖库
+
+动态加载so
+	dlopen
+
+插件化加载第三方sdk
+    DexClassLoader
+
+
+
+图片引擎问题：
+我们图片引擎是集成的Glide,设置的默认RGB_565格式没有生效，查看源码是原始设计API在26以上默认到ARGB_8888。
+在Glide内部，当图比view小的时候，在ImageView的scaleType不是fitXY和centerInsider配置的时候，会根据View的尺寸来放大解码，从而拉高内存的占用。
+业务繁杂，长期处于不可见状态的页面加载的图片一直未释放，其实这里可以适时释放掉，以降低内存水位。
+
+
+
+
+
+具体的优化策略：
+1、统一图片加载库，避免Bitmap的单独处理。
+    能够通过加载库帮我们统一加载、缓存图片，当系统内存紧张的时候，可以及时做一些处理。例如：释放图片下缓存，停止加载任务等。
+    例如：Glide，svga也使用glide加载
+=======================================================
+2、统一的缓存管理 
+    统一的缓存管理，方便我们在系统内存紧张的时候，释放做缓存。
+
+    框架：ASimpleCache（https://github.com/yangfuhai/ASimpleCache）
+    支持缓存String、JsonObject、JsonArray、Bitmap、Drawable、序列化的java对象等。
+    还支持缓存时效，超过时间就会清除。
+=======================================================
+3、合理使用onTrimMemory/onLowMemory。
+    onTrimMemory：系统会根据不同的内存状态来回调。（组件、Fragment、Application都有）
+        TRIM_MEMORY_COMPLETE：内存不足。你的进程在后台进程列表最后一个，马上就要被清理。
+        TRIM_MEMORY_MODERATE：内存不足。你的进程在后台进程列表的中部。
+        TRIM_MEMORY_BACKGROUND：内存不足。你的进程是后台进程。
+        TRIM_MEMORY_UI_HIDDEN：内存不足。你的进程的UI已经不可见了。
+        TRIM_MEMORY_RUNNING_CRITICAL：内存不足(后台进程不足3个)，并且该进程优先级比较高，需要清理内存
+        TRIM_MEMORY_RUNNING_LOW：内存不足(后台进程不足5个)，并且该进程优先级比较高，需要清理内存
+        TRIM_MEMORY_RUNNING_MODERATE：内存不足(后台进程超过5个)，并且该进程优先级比较高，需要清理内存
+
+    onLowMemory：系统内存紧张应用会收到此回调。（组件、Application都有）
+    对比：
+    onLowMemory最后一个后台进程被杀时调用，一般情况是low memory killer杀进程后触发；
+    onTrimMemory的触发更频繁，每次计算进程优先级后只要满足条件都会触发。
+    发现 onTrimMemory 的 ComponetnCallbacks2.TRIM_MEMORY_COMPLETE 并不等价于 onLowMemory，因此建议仍然要去监听 onLowMemory 回调。
+=======================================================
+4、设备分级优化策略。（facebook的device-year-class库区分设备性能）
+    根据不用设备的性能来制定策略。低端机用户可以关闭复杂的动画或”重功能“ 或 使用565格式的图片或更小的缓存内存等等。
+    例如：跳过大内存的礼物动效的加载以及播放；动态点赞动效的跳过等负责动效的跳过；后台根据设备分开返回动效背景、动效头饰改为静态；图片加载设置RGB_565格式等。
+=======================================================
+5、谨慎使用多进程。
+    Zygote在fork子进程之后，会给它初始化一些资源。（一个空进程也会占用10MB+内存）
+    例如：Resources的sPreloadedDrawables、sPreloadedColorDrawables列表就是Zygote为我们预加载的。如果进程没有界面可以通过反射将这些资源释放。
+
+6、线下Bitmap检测（包括：不合理使用图片检测；重复图片检测）。
+    不合理使用图片检测：当Bitmap宽高比ImageView要大得多的时候属于不合理。（主要发生在非Glide组件创建图片的场景）
+    hook住ImageView#setImageBitmap，如果Bitmap宽高比ImageView大一倍，就发打日志警告。
+    Epic（AOP编程、运行时插桩、性能分析、安全审计）https://github.com/tiann/epic
+
+
+    重复图片检查：Bitmap像素数据完全一样，但是有多个不同的对象。
+    
+        8.0以下：
+
+        8.0以上：
+=======================================================
+7、内存监控 以及 GC监控
+    内存监控：每隔3分钟做一次内存信息收集
+    1）常规（待机、非重点模块）内存监控（收集信息上报，有利于分析各版本之间的内存使用健康程度 以及 查看内存优化的效果）
+    2）重点模块内存监控（收集信息上报）
+    3）低内存监控：在内存紧张的情况下，收集信息上报 并且 及时进行内存释放
+        1、虚拟内存使用超85%，是个非常危险的信号。GC会变得更加频发，容易造成OOM和卡顿。
+            long javaMax = Runtime.maxMemory();
+            long javaTotal = Runtime.totalMemory();
+            long javaUsed = javaTotal - runtime.freeMemory();
+            float proportion = (float) javaUsed / javaMax;
+        2、物理内存紧张 onTrimMemory/onLowMemory
+
+    GC监控：GC获取会有一定的性能，线上的话最好只在重点模块打开。
+    重点关注阻塞式GC的次数和耗时，因为它会暂停线程，可能导致应用发生卡顿。
+
+    收集的信息：
+    内存使用
+    GC次数以及耗时
+        6.0之前：
+        long allocCount = Debug.getGlobalAllocCount();
+        long allocSize = Debug.getGlobalAllocSize();
+        long gcCount = Debug.getGlobalGcInvocationCount();
+        6.0之后：
+        Debug.getRuntimeStat("art.gc.gc-count");
+        Debug.getRuntimeStat("art.gc.gc-time");
+        Debug.getRuntimeStat("art.gc.blocking-gc-count");
+        Debug.getRuntimeStat("art.gc.blocking-gc-time");
+    hprof：Debug.dumpHprofData()
+    top5的内存占用对象
+
+
+KOOM
+
+
+
+1）、待机内存、重点模块内存、OOM率。
+2）、整体及重点模块 GC 次数、GC 时间。
+3）、增强的 LeakCanry 自动化内存泄漏分析。
+4）、低内存监控模块的设置。
+
+
+
+比如你写个插件，直接在图片上显示这个图片的大小的
+webview缓存优化
