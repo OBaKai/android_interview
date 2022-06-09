@@ -786,6 +786,14 @@ public boolean finishReceiverLocked(BroadcastRecord r, int resultCode, String re
 
 
 
+## 发送广播
+
+```java
+ContextImpl#sendBroadcast -> ActivityManager#getService#broadcastIntent -> 
+```
+
+
+
 ## 本地广播
 
 ```java

@@ -143,6 +143,8 @@ private ContentProviderHolder installProvider(Context context,ContentProviderHol
                 provider = localProvider.getIContentProvider();
                 if (provider == null) { return null; }
               	//attachInfo：给Provider赋予上下文 并且 调用ContentProvider#onCreate
+                //ContentProvider#attachInfo -> ContentProvider.this.onCreate()
+                //public boolean onCreate()，onCreate有返回值的，但是内部没有处理返回值
                 localProvider.attachInfo(c, info); 
             } catch (java.lang.Exception e) { ... }
         } 

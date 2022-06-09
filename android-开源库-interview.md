@@ -287,6 +287,13 @@ RxJavaPlugins.setErrorHandler(new Consumer<Throwable>() {
 
 #### OKHttp
 
+1. okhttp 的拦截器设计的非常好，扩展性极强，那么这部分它是基于哪些设计模式？具体如何实现的呢？
+2. okhttp 其内部多个请求的任务管理，返回结果的分发是如何设计的？
+
+3. okhttp 内部的连接池是如何实现的？缓存多少连接，缓存多久，何时释放资源？
+
+
+
 ##### OKHttp 请求的整体流程是怎样的?
 
 ```java

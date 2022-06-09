@@ -3217,6 +3217,7 @@ input事件：
 	battery historian的分析工具，图形化解析bugreport.txt文件。（https://github.com/google/battery-historian）
 ③ data\anr\traces.txt
 ④ dropbox日志（系统运行中所发生的crash、anr、eventlog都会保存在这）：目录/data/system/dropbox（需要root）；可用DropBoxManager取出（需要系统权限）。
+  adb shell dumpsys dropbox --print  >  crash.txt  
 ====================================================
   
 4、业务逻辑的正常运行
