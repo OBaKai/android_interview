@@ -1,0 +1,240 @@
+ANR  
+文章：
+https://cdn.modb.pro/db/68635
+https://cloud.tencent.com/developer/article/1969659
+https://www.jianshu.com/p/18f16aba79dd
+
+
+
+ANR发生：
+组件生命周期内做了耗时操作，触发了AMS的定时炸弹。
+触摸事件周期内做了耗时操作，触发了IuputDispather的检测机制。
+系统资源不足的时候（cpu资源不足，内存不足，binder线程不足等）。
+
+ANR分析：
+
+查看logcat日志（logcat可以分析大概是什么原因导致的ANR）
+	ANR in aaa.llk.trace (aaa.llk.trace/com.llk.trace.MainActivity)
+    PID: 24791  //发生的进程pid
+    Reason: Input dispatching timed out...   //产生原因
+    Parent: aaa.llk.trace/com.llk.trace.MainActivity  //ANR产生时的焦点窗口
+    Load: 0.71 / 0.68 / 0.66 //Cpu的负载（三个数字分别是1分钟、5分钟、15分钟内系统的平均负荷）
+    CPU usage from 21205ms to 0ms ago (2022-07-19 17:13:06.985 to 2022-07-19 17:13:28.190): //负载信息抓取在ANR发生之前的21205ms-0ms。同时指明ANR的时间点：17:13:06 - 17:13:28
+
+      //各个进程cpu占用情况
+      14% 894/surfaceflinger: 6.9% user + 8% kernel / faults: 299 minor 6 major
+      8.8% 1864/com.android.systemui: 5.5% user + 3.3% kernel / faults: 1184 minor 5 major
+      7.9% 1376/system_server: 4.1% user + 3.7% kernel / faults: 6509 minor 41 major
+      3.3% 24366/com.google.android.googlequicksearchbox:search: 2.7% user + 0.5% kernel / faults: 19071 minor 273 major
+      2.3% 1996/com.android.launcher3: 1.8% user + 0.4% kernel / faults: 9973 minor 76 major
+      1.7% 12309/com.tencent.android.qqdownloader:tools: 1.5% user + 0.1% kernel / faults: 1706 minor 33 major
+      1.3% 20846/com.tencent.mm: 0.7% user + 0.6% kernel / faults: 1936 minor 59 major
+
+
+  CPU负荷：查看命令 adb shell uptime
+  14:56:18 up 22 days, 40 min,  0 users,  load average: 0.29, 0.40, 0.54
+
+  当CPU完全空闲的时候，平均负荷为0；
+  当CPU工作量饱和的时候，平均负荷为1，通过Load可以判断系统负荷是否过重。
+  有一个形象的比喻：个CPU想象成一座大桥，桥上只有一根车道，所有车辆都必须从这根车道上通过，系统负荷为0，意味着大桥上一辆车也没有，系统负荷为0.5，意味着大桥一半的路段有车，系统负荷为1.0，意味着大桥的所有路段都有车，也就是说大桥已经"满"了，系统负荷为2.0，意味着车辆太多了，大桥已经被占满了（100%），后面等着上桥的车辆还有一倍。大桥的通行能力，就是CPU的最大工作量；桥梁上的车辆，就是一个个等待CPU处理的进程（process）。
+
+  经验法则是这样的：
+  当系统负荷持续大于0.7，你必须开始调查了，问题出在哪里防止情况恶化。
+  当系统负荷持续大于1.0，你必须动手寻找解决办法，把这个值降下来。
+  当系统负荷达到5.0，就表明你的系统有很严重的问题
+
+
+  a. user:用户态，kernel:内核态
+	b. faults:内存缺页，minor——轻微的，major——重度，需要从磁盘拿数据
+	c. iowait:IO使用（等待）占比
+	d. irq:硬中断，softirq:软中断
+
+	注意：
+	iowait占比很高，意味着有很大可能，是io耗时导致ANR，具体进一步查看有没有进程faults major比较多。
+	单进程CPU的负载并不是以100%为上限，而是有几个核，就有百分之几百，如4核上限为400%。
+
+
+	内存信息（不一定有）
+	Total number of allocations 476778　　进程创建到现在一共创建了多少对象
+	Total bytes allocated 52MB　进程创建到现在一共申请了多少内存
+	Total bytes freed 52MB　　　进程创建到现在一共释放了多少内存
+	Free memory 777KB　　　 不扩展堆的情况下可用的内存
+	Free memory until GC 777KB　　GC前的可用内存
+	Free memory until OOME 383MB　　OOM之前的可用内存
+	Total memory 当前总内存（已用+可用）
+	Max memory 384MB  进程最多能申请的内存
+
+	从含义可以得出结论：Free memory until OOME 的值很小的时候，已经处于内存紧张状态。应用可能是占用了过多内存。
+
+	查看eventlog（不一定有）
+	I am_meminfo: [350937088,41086976,492830720,427937792,291887104]
+	五个值：Cached，Free，Zram，Kernel，Native
+	Cached+Free的内存代表着当前整个手机的可用内存，如果值很小，意味着处于内存紧张状态。
+	一般低内存的判定阈值为：4G内存手机以下阀值：350MB，以上阀值则为：450MB
+	ps: 如果ANR时间点前后，日志里有打印onTrimMemory，也可以作为内存紧张的一个参考判断
+
+
+
+
+查看trace文件
+
+trace内容解析
+  "main" prio=5 tid=1 Native
+  | group="main" sCount=1 dsCount=0 flags=1 obj=0x71560df8 self=0x7a80246c00
+  | sysTid=24791 nice=-10 cgrp=default sched=0/0 handle=0x7b06305ed0
+  | state=S schedstat=( 309084171 15243024 335 ) utm=24 stm=6 core=1 HZ=100
+  | stack=0x7fd43ad000-0x7fd43af000 stackSize=8192KB
+  | held mutexes=
+
+"main"：线程名称，prio：线程优先级，tid：不是线程id是一个虚拟机中实现线程锁的变量，Native：Linux线程状态
+
+group：线程组名，sCount：线程被挂起的次数，dsCount：线程被调试器挂起的次数，odj：线程java对象的地址，self：这个线程本身的地址
+（当进程开始调试后sCount会变为0，调试结束判断是否被正常挂起进行增长，但是dsCount不会变为0，所以dsCount可以用来判断这个线程是否被调试过）
+
+sysTid：Linux下内核线程ID（主线程的话，与进程号相同），nice：Linux线程的优先级（nice值越小优先级越高。-10优先级就已经很高了），sched：分别标志线程的调度策略和优先级，cgrp：调度数组，handle：线程的处理函数地址
+
+state：调度状态，utm：线程用户态下使用的时间值，stm：内核态下的调度时间值，core：最后执行这个线程的cpu核的序号
+
+
+Linux线程状态：
+ZOMBIE                              线程死亡，终止运行
+RUNNING/RUNNABLE                    线程可运行或正在运行
+TIMED_WAIT                          执行了带有超时参数的wait、sleep或join函数
+MONITOR                             线程阻塞，等待获取对象锁
+WAIT                                执行了无超时参数的wait函数
+INITIALIZING                        新建，正在初始化，为其分配资源
+STARTING                            新建，正在启动
+NATIVE                              正在执行JNI本地函数
+VMWAIT                              正在等待VM资源
+SUSPENDED                           线程暂停，通常是由于GC或debug被暂停
+
+
+
+案例1：主线程无卡顿，处于正常状态堆栈
+	"main" prio=5 tid=1 Native（处于JNI调用）
+	...
+	at android.os.MessageQueue.nativePollOnce(Native method)
+  at android.os.MessageQueue.next(MessageQueue.java:330)
+  at android.os.Looper.loop(Looper.java:169)
+  at android.app.ActivityThread.main(ActivityThread.java:7073)
+  at java.lang.reflect.Method.invoke(Native method)
+  at com.android.internal.os.RuntimeInit$MethodAndArgsCaller.run(RuntimeInit.java:536)
+  ...
+
+  分析：堆栈是很正常的空闲堆栈，表明主线程正在等待新的消息。如果ANR日志里主线程是这样一个状态。
+  那可能有两个原因：
+	1、该ANR是CPU抢占或内存紧张等其他因素引起 -> 分析CPU、内存的情况
+	2、这份ANR日志抓取的时候，主线程已经恢复正常 -> 关注trace抓日志的时间和ANR发生的时间是否相隔过久，太久这个堆栈就没分析的意义了。
+
+
+案例2：主线程执行耗时操作
+	 "main" prio=5 tid=1 Runnable（处于运行状态）
+	 ...
+	 at com.example.test.MainActivity$onCreate$2.onClick(MainActivity.kt:20)
+   at android.view.View.performClick(View.java:7187)
+   at android.view.View.performClickInternal(View.java:7164)
+   at android.view.View.access$3500(View.java:813)
+   at android.view.View$PerformClick.run(View.java:27640)
+   ...
+
+   分析：主线程正处于执行状态，堆栈并不是处于空闲状态，发生ANR是因为一处click监听函数里执行了耗时操作。
+
+
+案例3：主线程被锁阻塞
+  "main" prio=5 tid=1 Blocked（处于阻塞状态）
+  ...
+	at com.example.test.MainActivity$onCreate$1.onClick(MainActivity.kt:15)
+  - waiting to lock <0x01aed1da> (a java.lang.Object) held by thread 3
+  at android.view.View.performClick(View.java:7187)
+  at android.view.View.performClickInternal(View.java:7164)
+  ...
+
+  "WQW TEST" prio=5 tid=3 TimeWating（处于等待状态）
+  ...
+  at java.lang.Thread.sleep(Native method)
+  - sleeping on <0x043831a6> (a java.lang.Object)
+  at java.lang.Thread.sleep(Thread.java:440)
+  - locked <0x043831a6> (a java.lang.Object)
+  at java.lang.Thread.sleep(Thread.java:356)
+  at com.example.test.MainActivity$onCreate$2$thread$1.run(MainActivity.kt:22)
+  - locked <0x01aed1da> (a java.lang.Object)
+  at java.lang.Thread.run(Thread.java:919)
+
+  分析：主线程等待tid为3的线程的一个锁对象（0x01aed1da），但是tid为3的线程处于等待状态，导致主线程阻塞从而导致ANR的发生。
+  注意：常见因锁而ANR的场景是SharePreference写入。
+
+
+案例4：CPU被抢占
+	CPU usage from 0ms to 10625ms later (2020-03-09 14:38:31.633 to 2020-03-09 14:38:42.257):
+  543% 2045/com.alibaba.android.rimet: 54% user + 89% kernel  faults: 4608 minor 1 major
+  99% 674/android.hardware.camera.provider@2.4-service: 81% user + 18% kernel  faults: 403 minor
+  24% 32589/com.wang.test: 22% user + 1.4% kernel  faults: 7432 minor 1 major
+  ...
+
+  分析：钉钉的进程，占据CPU高达543%，抢占了大部分CPU资源，因而导致发生ANR
+
+案例5：内存紧张导致ANR
+	CPU和堆栈都很正常，仍旧发生ANR了
+	系统日志里搜索am_meminfo， 这个没有搜索到
+	再次搜索onTrimMemory，果然发现了很多条记录
+
+	10-31 22:37:19.749 20733 20733 E Runtime : onTrimMemory level:80,pid:com.xxx.xxx:Launcher0
+	10-31 22:37:33.458 20733 20733 E Runtime : onTrimMemory level:80,pid:com.xxx.xxx:Launcher0
+	10-31 22:38:00.153 20733 20733 E Runtime : onTrimMemory level:80,pid:com.xxx.xxx:Launcher0
+	...
+
+	分析：在发生ANR的时间点前后，内存都处于紧张状态，level等级是80。等级是很严重的，应用马上就要被杀死，被杀死的这个应用从名字可以看出来是桌面，连桌面都快要被杀死，那普通应用能好到哪里去呢？
+	一般来说，发生内存紧张，会导致多个应用发生ANR，所以在日志中如果发现有多个应用一起ANR了，可以初步判定，此ANR与你的应用无关。
+
+案例6：系统服务超时导致ANR
+	"main" prio=5 tid=1 Native
+	...
+	at android.os.BinderProxy.transactNative(Native method)
+  at android.os.BinderProxy.transact(Binder.java:804)
+  at android.net.IConnectivityManager$Stub$Proxy.getActiveNetworkInfo(IConnectivityManager.java:1204)—关键行！
+  at android.net.ConnectivityManager.getActiveNetworkInfo(ConnectivityManager.java:800)
+  at com.xiaomi.NetworkUtils.getNetworkInfo(NetworkUtils.java:2)
+  at com.xiaomi.frameworkbase.utils.NetworkUtils.getNetWorkType(NetworkUtils.java:1)
+  ...
+
+  分析：从堆栈可以看出获取网络信息发生了ANR：getActiveNetworkInfo。
+  一个进程最多能使用16个binder线程。如果当systemserver的全部Binder线程都被阻塞，故不能再分配Binder线程处理其他的Binder消息，导致其他进程给systemserver发送Binder消息时是会被阻塞，且没有对端binder线程的。
+
+  可进一步搜索：blockUntilThreadAvailable关键字：
+  at android.os.Binder.blockUntilThreadAvailable(Native method)
+
+  如果有发现某个线程的堆栈，包含此字样，可进一步看其堆栈，确定是调用了什么系统服务。
+  此类ANR也是属于系统环境的问题，如果某类型机器上频繁发生此问题，应用层可以考虑规避策略。
+
+  如果是Binder call产生的ANR，需要进一步确认下对端的情况；
+  如果是耗时操作，直接修改成异步。怀疑系统执行慢可以看看binder_sample，dvm_lock等信息，其次gc多不多，lmk杀进程是不是很频繁，都可以看出系统的健康状态。
+
+  Logcat中寻找蛛丝马迹：
+  binder_sample：
+  说明: 监控每个进程的主线程的binder transaction的耗时情况，当超过阈值时，则输出相应的目标调用信息，默认1000ms打开
+  格式: 52004 binder_sample (descriptor|3),(method_num|1|5),(time|1|3),(blocking_package|3),(sample_percent|1|6)
+
+  例子: 2754 2754 I binder_sample: [android.app.IActivityManager,35,2900,android.process.media,5]
+  从上面的log中可以得出
+  1、主线程 2754
+  2、执行android.app.IActivityManager接口
+  3、所对应方法code=35(即STOP_SERVICE_TRANSACTION),
+  4、所花费时间为2900ms
+  5、该block所在package为 android.process.media 
+  最后一个参数是sample比例(没有太大价值)
+
+
+  dvm_lock_sample
+  说明: 当某个线程等待lock的时间blocked超过阈值,则输出当前的持锁状态
+  格式: 20003 dvm_lock_sample (process|3),(main|1|5),(thread|3),(time|1|3),(file|3),(line|1|5),(ownerfile|3),(ownerline|1|5),(sample_percent|1|6)
+
+  例子: dvm_lock_sample: [system_server,1,Binder_9,1500,ActivityManagerService.java,6403,-,1448,0]
+  1、system_server: Binder_9在执行到ActivityManagerService.java的6403行代码
+  2、一直在等待AMS锁，而该锁所同一文件的1448行代码所持有，从而导致Binder_9线程被阻塞1500ms
+
+
+  binder starved
+  说明: 当system_server等进程的线程池使用完, 无空闲线程时, 则binder通信都处于饥饿状态, 则饥饿状态超过一定阈值则输出信息
+  参数: persist.sys.binder.starvation (默认值16ms)
+  例子: 1232 1232 "binder thread pool (16 threads) starved for 100 ms"
+  system_server进程的线程池已满的持续长达100ms，一般有了这些信息之后，可以辅助我们确定问题原因归属是系统原因还是App原因
