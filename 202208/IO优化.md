@@ -248,6 +248,13 @@ Protocol Buffers（最棒，有空学下）
 ##### SQLite优化（待学习）
 
 ```java
+数据库选择：
+SQLite - Android本身自带
+Realm - YCombinator出品的多版本并发控制数据库 - 我们项目就是用这货
+LevelDB - Google的开源key-value数据库
+
+
+SQLite相关：
 Android开发高手课 - 数据库SQLite的使用和优化：https://time.geekbang.org/column/article/77546
 
 1、ORM（Object Relational Mapping）对象关系映射
