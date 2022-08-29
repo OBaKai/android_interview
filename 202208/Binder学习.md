@@ -1,21 +1,3 @@
-## 文章
-
-[Android Bander设计与实现 - 设计篇](https://blog.csdn.net/universus/article/details/6211589)
-
-[彻底理解Android Binder通信架构](http://gityuan.com/2016/09/04/binder-start-service/)
-
-[进程的Binder线程池工作过程](http://gityuan.com/2016/10/29/binder-thread-pool/)
-
-[Binder系列—开篇](http://gityuan.com/2015/10/31/binder-prepare/)
-
-[Android源码的Binder权限是如何控制？](https://www.zhihu.com/question/41003297/answer/89328987)
-
-[Android 重学系列 Binder的总结](https://www.jianshu.com/p/62eee6cf03a3)
-
-[Android进程间通信AIDL的in、out、inout三种定向tag的使用](https://blog.csdn.net/wangwofeng1987/article/details/79963892)
-
-
-
 ## 自己一些的理解
 
 ```java
@@ -113,12 +95,12 @@ defaultServiceManager()->getService(String16("media.player"));
 ```java
 Binder是有传输限制的，因为Binder设计是为了在方便与进程间频繁交互的场景的，所以数据量不能太大。
 
-每个进程向Binder申请的缓冲区就 1MB - 4KB（详情可查看ProcessState初始化）
-并且这个缓冲区是所以Binder线程公用的。也就是说每次Binder传输数据最大就是 1MB - 4KB，一般情况下都是小于这个值的。
+每个进程向Binder申请的缓冲区就 1MB - 8KB（详情可查看ProcessState初始化）
+并且这个缓冲区是所以Binder线程公用的。也就是说每次Binder传输数据最大就是 1MB - 8KB，一般情况下都是小于这个值的。
   
 注意：
-oneway方式，最大传输为 (1MB - 4KB)/2
-非oneway的方式，最大传输才是 1MB - 4KB（同步方式优先级大于异步，为了充分满足同步调用的内存需要，所以异步方式需要进一步限制）
+oneway方式，最大传输为 (1MB - 8KB)/2
+非oneway的方式，最大传输才是 1MB - 8KB（同步方式优先级大于异步，为了充分满足同步调用的内存需要，所以异步方式需要进一步限制）
 ```
 
 
@@ -663,7 +645,7 @@ defaultServiceManager()->addService(String16("media.player"), new MediaPlayerSer
 ### service_manager介绍
 
 ```java
-Binder通信过程中的守护进程，同时自身也是一个Binder服务。
+Binder通信过程中的守护进程，同时自身也是一个Binder实体。
 service_manager作用是查询和注册系统服务。
   
 service_manager进程由init进程通过解析init.rc文件而创建的。
@@ -675,7 +657,7 @@ service_manager进程由init进程通过解析init.rc文件而创建的。
 
 ### service_manager启动
 
-1、走Binder机制三大步骤，让自己进入loop轮询。
+1、走Binder机制三大步骤，Binder主线程进入looper。
 
 2、等待Client端（应用程序）、Server端（系统服务）的请求
 
@@ -1832,3 +1814,22 @@ getRegisteredCallbackCount：返回当前要处理的callback数量
   
 kill：清空缓存方法。
 ```
+
+
+
+## 文章
+
+[Android Bander设计与实现 - 设计篇](https://blog.csdn.net/universus/article/details/6211589)
+
+[彻底理解Android Binder通信架构](http://gityuan.com/2016/09/04/binder-start-service/)
+
+[进程的Binder线程池工作过程](http://gityuan.com/2016/10/29/binder-thread-pool/)
+
+[Binder系列—开篇](http://gityuan.com/2015/10/31/binder-prepare/)
+
+[Android源码的Binder权限是如何控制？](https://www.zhihu.com/question/41003297/answer/89328987)
+
+[Android 重学系列 Binder的总结](https://www.jianshu.com/p/62eee6cf03a3)
+
+[Android进程间通信AIDL的in、out、inout三种定向tag的使用](https://blog.csdn.net/wangwofeng1987/article/details/79963892)
+
