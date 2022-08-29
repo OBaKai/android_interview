@@ -19,31 +19,51 @@
 ## 自己一些的理解
 
 ```java
-介绍Binder机制（无Binder不Android）
+无Binder不Android
   
-1、介绍 Binder机制的初始化步骤
+1、Binder机制的初始化
+1.1 三大步骤
 ① open Binder驱动（获得BinderFd）
 ② mmap binderFd，映射内存缓冲区
-③ 启动binder线程池，并且让binder主线程初始化
+③ 启动binder线程池，并且让Binder主线程初始化
+   Binder主线程是不会退出的，一直在轮询读取Binder驱动写进来的命令。
+   Binder主线程主要作用是提供给Binder实体用的，接收其他进程的IPC调用。
 
-
-2、介绍ProcessState这个单例类
+1.1、介绍ProcessState这个单例类
 Zygote fork后在子进程执行，第一时间就是调用 ProcessState::self()->startThreadPool()
 ProcessState是个单例类，在ProcessState构造函数里边走了Binder机制的初始化步骤。
 （ProcessState类无处不在，系统服务进程也是使用它的）
+并且ProcessState还封装了所有IPC的发送、接收逻辑。
 
-  
-3、介绍 service_manager进程
-用过 ProcessState::self() 进程就已经拥有了使用Binder的能力了，那是不是就可以进行跨进程通讯了呢？
+引出问题：
+用了 ProcessState::self() 进程就已经拥有了使用Binder的能力了，那是不是就可以进行跨进程通讯了呢？
 当然不行，你要跟谁通讯你都还不知道呢。
+  
+2、何如与其他进程通信
+2.1、Binder实体 与 Binder引用
+Binder实体：服务端的Binder对象实体，在Binder驱动以binder_node结构保存在服务端所在进程的binder_proc结构中，通过handle值能够查找到。当服务端的Binder对象发布给客户端的时候，Binder驱动会将其转为Binder引用。
+  
+Binder引用：客户端持有服务端的Binder对象的引用，在Binder驱动中以binder_ref结构保存在客户端所在进程的binder_proc结构中。客户端就是依靠Binder引用与服务端通讯的。  
+ 
+Binder引用 与 Binder实体 的体现方式
+java    BinderProxy（transact方法）   Binder对象（实现onTransact）
+native  BpBinder      BBinder
+驱动     binder_ref    binder_node
 
+2.2、实名Binder 与 匿名Binder
+实名Binder：系统进程为了方便应用进程很方便地与其进行通讯，会将自己的Binder实体发布给 service_manager进程。service_manager进程得到了其Binder引用就缓存起来。应用进程通过 name 方式跟service_manager进程查询获取对应的Binder引用。
+  
+匿名Binder：没有公开自己的Binder引用，双方进程通过协商一致后，服务端进程才会发布Binder实体给客户端进程。
+最常见的就是两个应用进程之间的通讯了，通过客户端进程bindSerivce，AMS再向另外一个进程的Service组件请求发布Binder实体，客户端才能拿到Binder引用。
+  
+2.3、介绍 service_manager进程
 ① Binde的电话簿 - service_manager进程
 就像我们想打电话给一个朋友，我们只记得他的名字，但是不记得他的号码，那我们就去电话簿对着名字找他号码就行了。
 
 ② 怎么与service_manager进程通讯？
 存朋友的电话号码，那肯定是先有电话簿才能存号码吧。
-service_manager进程是第一个open binder驱动的进程，其handle值为0（知道handle值，就能够让Binder驱动找到对应的binder_proc结构了）。
-defaultServiceManager函数：传入handle值0，让其返回service_manager进程的Binder对象。
+service_manager进程是第一个open binder驱动的进程，其Binder实体的handle值为0（知道handle值，就能够让Binder驱动找到对应的Binder实体的数据结构了）。
+defaultServiceManager函数：传入handle值0，让其返回service_manager进程的Binder引用。
  
 ③ 存电话号码 - 注册服务（当然这里的服务指系统服务，并不是四大组件中的Service）
 defaultServiceManager()->addService(String16("media.player"), new MediaPlayerService());
@@ -51,17 +71,37 @@ defaultServiceManager()->addService(String16("media.player"), new MediaPlayerSer
 
 ④ 查电话号码 - 获取服务
 defaultServiceManager()->getService(String16("media.player"));
-通过名称获取对应的服务的Binder对象，这样就能够与其进行通讯了
+通过名称获取对应的服务的Binder引用，这样就能够与其进行通讯了
   
-4、app进程 与 系统服务的通讯
-我们需要与系统服务通讯，我们知道系统服务的名字，叫做"media.player"，但我们无法不知道其handle值，所以就找service_manager进程进行查询，然后service_manager进程返回该系统服务Binder对象给我们。我们就能与其通讯了。
   
-5、app进程 与 其他app进程的通讯
-系统服务有service_manager进程这个电话簿记录。那app进程之间的通讯呢？ --- AMS
-一般情况下，我们与其他进程通讯都先bindService，然后从onServiceConnected回调拿到Binder对象然后进行通讯吧。
-Service都是受AMS管理的，当bindService后，AMS就会找到对应进程的对应Service向其申请Binder对象。该Service走onBind返回Binder对象给AMS，然后AMS再通过onServiceConnected回调返回给那个bindService的进程。
+3、Binder的通讯过程是怎么样的？
   
-未完待续...
+3.1、客户端进程向服务端进程申请Binder引用
+① 客户端申请Binder引用（bindService）
+② 服务端发布Binder实体（onBind -> 返回Binder对象）
+③ Binder驱动将 服务端的Binder对象 转 node结构保存起来，然后转发Binder引用给到AMS
+   Binder引用里边，其实就只有Binder实体对应的handle值
+④ AMS将Binder引用转发客户端
+   Binder驱动也会为拿到Binder引用的进程添加ref结构
+3.2、客户端通过Binder引用发起Binder调用
+① BinderProxy#transact -> BpBinder#transact -> ProcessState#transact
+   将handle + 命令(BC_TRANSACTION) + Parcel数据包封装成 binder_transaction_data 写入到 mOut
+③ 然后调用 ProcessState#waitForResponse
+  while(1) -> 进入轮询，重复以下操作
+  1、talkWithDriver()：与驱动交互，ioctl传入驱动fd，BINDER_WRITE_READ命令，mOut中的数据
+     写了之后，下次轮询就是想驱动读数据了（会有判断是要向驱动读还是写的）
+  2、mIn 读命令并且处理
+     BR_TRANSACTION_COMPLETE：Binder驱动收到了（oneway的话这里就返回了，非oneway就继续等待回复）
+     BR_REPLY：有回复了，从 mIn 读取出一个 binder_transaction_data，然后返回
+3.3、服务端的Binder实体接收Binder调用
+  Binder主线程不断读取Binder驱动发来的命令，重复以下操作
+  1、talkWithDriver()：与驱动交互。这个方法不但是写的，读也是在这里发生的（会有判断是要向驱动读还是写的）
+  2、mIn 读命令并且处理
+    BC_TRANSACTION：读取数据，然后 BBinder#onTransact -> Binder#onTransact
+  3、等返回数据给客户端啊！
+    将handle + 命令(BC_REPLY) + Parcel数据包封装成 binder_transaction_data 写入到 mOut
+    在下一次轮询的时候，talkWithDriver()会将mOut数据返送给驱动
+  4、驱动将命令翻译为BR_REPLY，然后丢给客户端
 ```
 
 
