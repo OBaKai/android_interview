@@ -1,3 +1,51 @@
+## 匿名共享内存（Ashmem）
+
+```java
+使用：三步
+1、打开虚拟文件获取fd；
+  fd = open("/dev/ashmem", O_RDWR | O_CLOEXEC)
+2、给fd设置名字；
+  ioctl(fd, ASHMEM_SET_NAME, buf)
+3、给fd设置大小
+	ioctl(fd, ASHMEM_SET_SIZE, size)
+
+  
+跨进程使用：
+进程a打开"/dev/ashmem"获取fd，将数据写入fd。然后fd用Binder传递到进程b，进程b通过该fd的读写就能获取到数据。
+
+进程a的fd与进程b的fd同一个fd吗？
+	不是用一个，不过它们指向内核中的同一个文件。
+fd如何实现指向同一个文件的？
+	Binder驱动帮我们实现的。源码 Binder.c#binder_transaction
+	Binder在进程b中寻找一个未使用的fd，然后将进程a的fd指向信息赋值给进程b这个未使用的fd。（Binder的翻译功能）
+
+
+疑问：
+为什么设计一个匿名共享内存？共享内存不能满足需求吗？
+	共享内存：映射的是一个硬盘中真实存在的文件
+	匿名共享内存：匿名共享内存映射的一个虚拟文件
+	匿名共享内存更加安全，①通讯过程不会产生额外文件；②可防止其他进程打开通讯文件
+为什么有了Binder还需要匿名共享内存？
+	Binder设计初衷是为了进程间 频繁 且 数据量小 的通讯（Binder缓冲区有大小限制）
+	但是如果需要跨进程传递大数据怎么办？就该匿名共享内存出场了。
+	通常Binder跨进程传递大数据都是使用匿名共享内存的（可参考跨进程传递大Bitmap）。
+
+
+驱动层代码位置：
+/drivers/staging/android/ashmem.c
+/drivers/staging/android/uapi/ashmem.h
+  
+framework native层代码位置：
+system/core/libcutils/Ashmem-dev.c
+frameworks/base/core/jni/android_os_MemoryFile.cpp
+frameworks/base/core/jni/android_os_MemoryFile.h
+  
+framework java层代码位置：
+frameworks/base/core/java/android/os/MemoryFile.java
+```
+
+
+
 ## 自己一些的理解
 
 ```java
@@ -20,7 +68,7 @@ ProcessState是个单例类，在ProcessState构造函数里边走了Binder机�
 引出问题：
 用了 ProcessState::self() 进程就已经拥有了使用Binder的能力了，那是不是就可以进行跨进程通讯了呢？
 当然不行，你要跟谁通讯你都还不知道呢。
-  
+
 2、何如与其他进程通信
 2.1、Binder实体 与 Binder引用
 Binder实体：服务端的Binder对象实体，在Binder驱动以binder_node结构保存在服务端所在进程的binder_proc结构中，通过handle值能够查找到。当服务端的Binder对象发布给客户端的时候，Binder驱动会将其转为Binder引用。

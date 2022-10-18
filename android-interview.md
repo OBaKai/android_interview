@@ -1007,7 +1007,7 @@ Fragment重新创建的时候，由于什么原因（例如横竖屏切换）导
 ```java
 replace：替换Fragment，也就是先移除再添加。生命周期内获取获取数据，使用replace会重复获取。
 add：添加Fragment，只是覆盖上一个Fragment。add一般会伴随hide()和show()，避免布局重叠。
-添加相同Fragment的时候，用replace不会有任何变化，而add会抛移除。
+添加相同Fragment的时候，用replace不会有任何变化，而add会抛异常。
 使用add如果应用放在后台或以其他方式被系统销毁，再打开时，hide()中引用的fragment会销毁，所以依然会出现布局重叠bug，可以使用replace或使用add时，添加一个tag参数。
 ```
 
@@ -1484,6 +1484,36 @@ Choreographer有监听Vsync信号，一旦收到信号就会执行doFrame方法�
 10.优化自定义View的计算 - clipRect
 学会裁剪掉View的覆盖部分，增加cpu的计算量，来优化GPU的渲染，这个API可以很好的帮助那些有多组重叠组件的自定义View来控制显示的区域。同时clipRect方法还可以帮助节约GPU资源，在clipRect区域之外的绘制指令都不会被执行，那些部分内容在矩形区域内的组件，仍然会得到绘制。并且在onDraw方法中减少View的重复绘制。
 ```
+
+
+
+##### getDecorView 和 peekDecorView 有什么区别
+
+```java
+   //PhoneWindow里边这两个方法的实现的实现
+   @Override
+	 public final @NonNull View getDecorView() { //该方法确保了 DecorView 不为空
+        if (mDecor == null || mForceDecorInstall) {
+            installDecor(); //多调用一次installDecor
+        }
+        return mDecor;
+    }
+
+    @Override
+    public final View peekDecorView() {
+        return mDecor;
+    }
+
+
+installDecor()是在 setContentView(int layoutResID)方法内被调用，为windows添加decorview页面
+
+installDecor执行流程
+使用 generateDecor()创建一个DecorView对象,并赋值给mDecor变量。该变量并不完全等同于窗口修饰，窗口修饰是mDecor内部的唯一一个子视图。
+根据用户指定的参数选择不用的窗口修饰，并把该窗口修饰作为mDecor的子窗口，这是在generateLayout()中调用mDecor.addView()完成的.
+给mContentParent变量赋值，其值是通过调用ViewGroup.contentParent = (ViewGroup)findViewById(ID_ANDROID_CONTENT)获得的，ID_ANDROID_CONTENT正是id = content 的 FrameLayout
+```
+
+
 
 
 
@@ -2968,11 +2998,115 @@ https://blog.csdn.net/qq_21258529/article/details/90293388
 
 ##### 说说你对Context的了解。
 
-##### Activity、Context、Application三者有什么不同。+2
+```java
+1、介绍Context
+Context是个抽象类，实现类是ContextImpl，实现类由安卓系统提供。
+有了Context之后就能访问应用特定的资源和类，并且还能发起一些应用层的调用（如启动Activity、发广播等）
 
-##### Intent的作用。
+2、说说Context的种类（继承Context的类）
+应用中有三种不同的Context，分别是Application、Activity、Service
+  
+Application 继承自ContextWrapper（ContextWrapper继承自Context）
+	Context创建过程：在Application创建过程中，会先创建一个ContextImpl对象，然后再创建Application对象，最后通过Application#attachBaseContext方法，将ContextImpl对象赋值给ContextWrapper#mBase
+Activity 继承自ContextThemeWrapper，ContextThemeWrapper又继承自ContextWrapper
+	ContextThemeWrapper：带了一些跟UI相关的变量
+ 	Context创建过程：在Activity创建过程中，先创建Activity对象，然后再创建一个ContextImpl对象，最后通过Activity#attachBaseContext方法，将ContextImpl对象赋值给ContextWrapper#mBase
+Service 继承自ContextWrapper
+	Context创建过程：跟Application、Activity过程差不多
+  
+//这里是一个典型的静态代理，ContextWrapper包装了一个Context对象（mBase），所有调用都委托给他了。
+//mBase：就是ContextImpl对象
+public class ContextWrapper extends Context {
+    Context mBase;
 
-##### 创建dialog所需的上下文为什么必须是Activity
+    public ContextWrapper(Context base) {
+        mBase = base;
+    }
+
+    protected void attachBaseContext(Context base) {
+        mBase = base;
+    }
+
+	public Context getBaseContext() {
+        return mBase;
+    }
+
+    public Resources getResources() {
+        return mBase.getResources();
+    }
+
+    ...
+}
+  
+3、说明四大组件中广播接收者、内容提供者都不是Context。并且说明其内部的Context从哪里来。
+广播接收者：onReceive的Context哪里来的？
+动态注册：Context对象，就是注册接收者时候的Context对象（context.registerReceiver(xxxx)）
+静态注册：Context对象，是以Application为mBase的一个ContextWrapper
+	原理：
+	ContextImpl context = application.getBaseContext();
+	//ContextImpl#getReceiverRestrictedContext：new ReceiverRestrictedContext(getOuterContext())
+	//ReceiverRestrictedContext也是继承ContextWrapper，那么我们只要知道构造函数中的 Context base 是谁，就知道mBase是谁了。
+	//矛头指向getOuterContext方法，getOuterContext方法就是直接返回了一个mOuterContext对象。
+	//mOuterContext：是在Context创建过程中，通过setOuterContext赋值的ContextImpl对象。也就是说上边用谁（Application、Activity、Service）的Context，这里的mOuterContext就是谁的了。
+	receiver.onReceive(context.getReceiverRestrictedContext(), xxx);
+
+    //ReceiverRestrictedContext也是继承ContextWrapper，那么我们只要知道构造函数中的 Context base 是谁，就知道mBase是谁了。
+    //矛头只想 getOuterContext() 方法
+	class ReceiverRestrictedContext extends ContextWrapper {
+	    ReceiverRestrictedContext(Context base) {
+	        super(base);
+	    }
+	}
+
+内容提供者：成员变量mContext是哪里来的？
+内容提供者创建的时候传入的Application Context对象。
+内容提供者创建在Application#attachBaseContext之后就是为了获取Application Context对象。
+```
+
+
+
+##### 应用有多少个Context，不同Context有什么区别？
+
+```java
+Application个数（多进程）+ Activity个数 + Service个数。
+  
+Application 继承自ContextWrapper
+	Context创建过程：在Application创建过程中，会先创建一个ContextImpl对象，然后再创建Application对象，最后通过Application#attachBaseContext方法，将ContextImpl对象赋值给ContextWrapper#mBase
+Activity 继承自ContextThemeWrapper，ContextThemeWrapper又继承自ContextWrapper
+	ContextThemeWrapper：带了一些跟UI相关的变量
+ 	Context创建过程：在Activity创建过程中，先创建Activity对象，然后再创建一个ContextImpl对象，最后通过Activity#attachBaseContext方法，将ContextImpl对象赋值给ContextWrapper#mBase
+Service 继承自ContextWrapper
+	Context创建过程：跟Application、Activity过程差不多
+```
+
+
+
+##### Activity this & getBaseContext 有什么区别？
+
+```java
+区别是两者返回对象不同：
+this返回Activity对象自己（Activity也是继承Context的）。
+getBaseContext返回的时候 mBase 这个Context对象。
+
+两者使用上没什么区别：
+Activity继承ContextWrapper，ContextWrapper实现的所有Context方法，都是委托给mBase的。
+```
+
+
+
+##### getApplication & getApplicationContext 有什么区别？
+
+```java
+getApplication 返回 Application对象
+getApplicationContext 返回 Context对象
+但是两者其实返回都是Application对象（Application也是继承自Context，可以强转的）
+
+区别：
+getApplicationContext 是Context抽象类的方法，哪里都可以用。
+getApplication 是Activity、Service特有的方法。所有在广播接收者、内容提供者里边无法使用该方法。
+```
+
+
 
 
 

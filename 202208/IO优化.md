@@ -26,7 +26,7 @@ fsync()回写：这时候系统会唤醒pdflush进程进行回写，直到所有
 
 #### IO的三种方式
 
-##### 标志IO
+##### 标准IO
 
 ```java
 读：file（内核空间）-> page cache（内核空间）-> user buffer（用户空间）---> 访问
