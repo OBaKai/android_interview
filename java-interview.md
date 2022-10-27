@@ -1,5 +1,45 @@
 ## Java
 
+#### 说说你对oop的理解，结合项目说一下
+
+```java
+oop：面向对象编程
+oop的特点是：封装、继承、多态
+oop优点：让程序易维护、易复用、易扩展
+
+结合项目来说的话，以mvp框架为例吧
+在mvp框架中，在p层会与v层、m层建立双向连接，让v层与m层彻底断开联系。
+
+p层的类我们一般会设计一个 baseP 这样的父类，然后各个业务模块的p层子类继承自这个 baseP，体现了oop继承特性。
+baseP设计的时候，我们是需要持有v层接口的实现，为了方便扩展，一般我们定义泛型 T extends baseView 接口（v层base接口）。当p层的子类需要到某个具体v层接口的时候，在给这个泛型T传入实际接口类，体现了oop多态特效。
+p层的这个类，我们会封装一些方法暴露出去，当v层需要某种能力的时候，就可以调用这个p层的对象的方法，让这个p层对象帮我们实现，体现了oop封装特性。
+```
+
+
+
+#### 重写和重载区别
+
+```java
+1.重写(Override)：父类与子类之间的多态表现
+其实就是在子类中把父类本身有的方法重新写一遍
+例如：a extends A
+A有个方法 set(){ "AAA" }
+a重写了A中的set方法，set(){ "aaa" }
+
+2.重载(Overload)：一个类中多态表现
+多个具有不同的参数个数或者类型的同名函数（返回值类型可随意，不能以返回类型作为重载函数的区分标准），调用方法时通过传递不同参数个数和参数类型来决定具体使用哪个方法的多态性。
+例如：
+AView(Context c)
+AView(Context c，AttributeSet att)
+AView(Context c，AttributeSet att, int style)
+
+https://blog.csdn.net/qunqunstyle99/article/details/81007712
+```
+
+
+
+
+
 #### 并发编程
 
 （并发的更多问题：[Java并发编程 I - 并发问题的源头](https://blog.csdn.net/yudan505/article/details/117841171)）
