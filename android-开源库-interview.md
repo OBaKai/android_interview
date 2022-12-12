@@ -1,3 +1,266 @@
+#### JetPack
+
+##### WorkManager
+
+```java
+WorkManager：负责管理后台任务（设计用意就是取代后台服务）
+api23以下：使用AlarmManager + BroadcastReceiver实现
+api23以上：使用JobScheduler实现
+
+使用：https://blog.csdn.net/qq_36699930/article/details/109840041
+Worker：任务的执行者，是一个抽象类，需要继承它实现要执行的任务。
+WorkRequest：指定让哪个 Woker 执行任务，指定执行的环境，执行的顺序等。 要使用它的子类 OneTimeWorkRequest 或 PeriodicWorkRequest。
+WorkManager：管理任务请求和任务队列，发起的 WorkRequest 会进入它的任务队列。
+WorkStatus：包含有任务的状态和任务的信息，以 LiveData 的形式提供给观察者，更新相关UI。
+
+特点：
+强大的生命力：任务一旦加入工作队列。就算进程被杀、设备重启，任务依然会在满足条件的情况下得到执行。
+
+
+原理总结：
+1、初始化流程
+在编译apk的时候在Manifest加入WorkManagerInitializer的ContentProvider，
+在ContentProvider#onCreate里边执行WorkManager#initialize。
+1.1、创建Room数据库保存配置信息（持久化保持）
+1.2、创建GreedyScheduler调度器
+1.3、检查并且执行发生意外的任务
+
+2、执行流程
+所有Work的操作都会更新到数据库，为了防止意外停止的时候可以重新读取数据库找到Work的操作进度重新执行。
+
+2.1、无约束任务的执行：通过GreedyScheduler丢到线程池里边执行
+
+2.2、带约束任务的实行：也是丢到线程池执行，但是带有约束条件
+约束条件的实现：广播接受者 + 数据库轮询机
+
+例如：work是受网络连接的约束
+网络关闭 -> 网络关闭广播 -> 打断work -> 更新work进度到数据库
+网络打开 -> 网络打开广播 -> 轮询机轮询数据库 -> 找到work -> 继续执行
+
+广播接受者逻辑：（静态注册广播）
+ConstrainProxy是一个广播接收者，ConstrainProxy有很多子类都对应着一种约束。
+在编译apk的时候会自动在Manifest里边加入这些约束子类，用于接受对应的广播。
+
+数据库轮询机：
+某个约束子类收到广播后，就会启动一个SystemAlarmScheduler服务，这个服务就会去读数据库的找到对应要执行的work，丢到线程池里边执行。
+```
+
+
+
+##### LiveData
+
+```java
+MediatorLiveData实现红点的统一管理：https://juejin.cn/post/6945419430176227359
+
+
+LiveData：一个可被观察的数据持有者类
+特点：
+1、数据可以被观察者订阅；
+2、能够感知组件（Fragment、Activity、Service）的生命周期；
+3、只有在组件出于激活状态（STARTED、RESUMED）才会通知观察者有数据更新；
+
+作用：
+1、保证数据与界面的实时更新
+LiveData采用了观察者模式设计，LiveData是被观察者，当数据发生变化时会通知观察者进行数据更新。
+2、有效避免内存泄漏
+LiveData能够感知组件的生命周期，它可以在组件处于激活状态下才通知观察者有数据更新；
+当组件状态处于destoryed状态时，观察者对象会被remove；
+比如Activity的生命周期，LiveData能确保仅在Activity处于活动状态下（生命周期处于onStart与onResume时）才会更新，也就是说当观察者处于活动状态，才会去通知数据更新，当生命周期处于onStop或者onPause时，不回调数据更新，直至生命周期为onResume时，立即回调。
+3、Activity/Fragment销毁掉时不会引起崩溃
+这是因为组件处于非激活状态时，在界面不会收到来自LiveData的数据变化通知。这样规避了很多因为页面销毁之后，修改UI导致的crash。
+
+
+原理总结：LiveData即时观察者，也是被观察者
+LiveData是观察者：能够观察UI组件的生命周期
+Activity/Fragment 被观察者（订阅过程是通过Lifecycle机制实现的。）
+LiveData是被观察者：能够被别人观察它里边的数据变化
+
+都是在 LiveData#observe 方法完成订阅（双向绑定）
+
+
+原理：
+1、LiveData#observe：简单来说就是实现了双向绑定（实现对UI组件这个被观察者的订阅，以及实现数据观察者对LiveData这个被观察者的订阅）
+LiveData#observe(LifecycleOwner owner（生命周期的被观察者）, Observer observer（数据的观察者）)
+1.1、实现对UI组件这个被观察者的订阅
+核心代码：
+//LifecycleBoundObserver对象，实现了LifecycleObserver，所以可以通过Lifecycle#addObserver订阅UI组件的生命周期
+//通过Lifecycle机制，收到UI组件的生命周期变化
+LifecycleBoundObserver wrapper = new LifecycleBoundObserver(owner, observer);
+owner.getLifecycle().addObserver(wrapper);
+
+1.2、实现数据观察者对LiveData这个被观察者的订阅
+核心代码：
+//LiveData里边维护了一个Observer容器（SafeIterableMap<Observer<? super T>, ObserverWrapper>）
+//当数据变化的时候，就会通知到这个容器的所有观察者
+LifecycleBoundObserver wrapper = new LifecycleBoundObserver(owner, observer);
+ObserverWrapper existing = mObservers.putIfAbsent(observer, wrapper);
+
+2、LiveData#setValue：更新数据（就遍历LiveData里边维护了一个Observer容器，给执行每个Observer#onChanged）
+2.1、细节1：激活状态的双重判断（确保UI是激活状态才更新数据）
+      if (!observer.mActive) { return; } //判断Observer自己的激活标志位
+      if (!observer.shouldBeActive()) { //判断UI组件这个被观察者是否处于激活状态
+         observer.activeStateChanged(false);
+         return;
+      }
+2.2、细节2、Version检查（防止重复回调）
+      //mVersion在 LiveData#setValue 的时候 ++了
+      //每次更新数据都会mVersion++。Observer里边也会维护自己的Version
+      //如果Observer的Version已经跟mVersion一样了，也就是该Observer收到过数据了，不给它重复回调了
+      if (observer.mLastVersion >= mVersion) { return; }
+      observer.mLastVersion = mVersion;
+
+
+LiveData产生粘性事件的原因：
+场景：ActivityA中LiveData#setValue(1)后，启动ActivityB后进行LiveData的订阅，ActivityB能够收到这个1的数据。
+原因：Lifecycle机制
+ActivityB启动后走完onStart生命周期，Lifecycle机制会给订阅它的观察者们更新生命周期状态。其中就包括了LiveData的这个观察者。
+在onStart状态更新后LiveData就会去触发一次数据分发。
+解决：通过反射更新一下observer的mLastVersion就行了
+
+
+LiveData防递归设计：
+场景：
+liveData.setValue(1); //① 更新数据1，分发逻辑是遍历容器给观察者a、b分发数据
+
+//② 观察者a收到了数据1，就立马执行更新数据2
+//③ 但是数据1的分发还没走完（还没走出遍历，也还没走完setValue），就再次触发更新数据（再次走setValue），形成递归
+liveData.observe(this, (Observer<Integer>) integer -> {
+      if (integer == 1){
+         liveData.setValue(2);
+      }
+});
+liveData.observe(this, (Observer<Integer>) integer -> { }); //观察者b
+
+LiveData的解决：
+void dispatchingValue(ObserverWrapper initiator) {
+        //② 由于 mDispatchingValue 被数据1分发流程设置为true了，所以数据2分发流程进入if
+        if (mDispatchingValue) {
+            //③ 数据2分发流程把 mDispatchInvalidated 设置为true，然后return了
+            mDispatchInvalidated = true;
+            return;
+        }
+        mDispatchingValue = true;
+        do { //⑦ 进入数据2的分发流程
+            mDispatchInvalidated = false;
+            ...
+            for (Iterator<...> iterator = mObservers.iteratorWithAdditions(); iterator.hasNext(); ) {
+                //① 数据1分发流程，给观察者a分发，但是观察者a这个老6，执行数据2更新
+                ocnsiderNotify(iterator.next().getValue());
+                //④ 由于数据2分发流程那边return了，这边走出来了。并且发现mDispatchInvalidated被数据2分发流程设置为ture了
+                if (mDispatchInvalidated) {
+                    //⑤ 直接跳出数据1分发流程的for循环，可怜的观察者b没机会收到数据1了
+                    break;
+                }
+            }
+        //⑥ mDispatchInvalidated被数据2分发流程设置为ture了，进入下一个do/while循环
+        } while (mDispatchInvalidated);
+        mDispatchingValue = false;
+}
+```
+
+
+
+##### ViewModel
+
+```java
+ViewModel：以注重生命周期的方式存储和管理界面相关的数据
+
+作用：
+1、保护数据不被销毁。
+   屏幕旋转会造成Activity/Fragment发生重建，缓存的数据就会跟着丢失，ViewModel可以保证自身不被重建。
+2、避免内存泄漏。
+   Activity destroy时会调用ViewModel#onCleared()
+3、用非常简单的方式，解决同一个Activity的不同Fragment的数据共享问题
+   在不同Fragment中通过 ViewModelProvider(activity).get(XXViewModel.clss) 就能够获取到相同的ViewModel对象了
+
+注意：ViewModel生命周期比Activity长，所以ViewModel中不能持有Activity引用
+   
+原理总结：
+ViewModelStore对象都是间接存在ActivityClientRecord中的，而ActivityClientRecord是维护在ActivityThread的，只有Activity真正销毁ActivityThread才会移除对应的ActivityClientRecord。
+在Activity配置变化时
+	ViewModelStore会在Activity销毁前保存到ActivityClientRecord
+	在Activity启动的时候又会从ActivityClientRecord恢复回来。
+
+原理：
+ViewModelProvider(activity).get(XXViewModel.clss)
+1、创建ViewModelProvider对象的时候传入activity对象，这里传入的是ViewModelStoreOwner，因为activity实现了ViewModelStoreOwner接口
+   public ViewModelProvider(@NonNull ViewModelStoreOwner owner)
+2、通过 ViewModelStoreOwner#getViewModelStore 方法获取到 ViewModelStore对象，执行 ViewModelStore#get(XXViewModel.clss)
+   ViewModelStore：ViewModel存储器（内部维护着一个 mViewModelStore容器，存储ViewModel的）
+   ViewModelStore#get：从mViewModelStore获取ViewModel，如果获取不到就通过反射创建一个，并且加入到mViewModelStore容器里边。
+       
+3、ViewModelStore又是如何存取的呢？使得ViewModel的生命周期比Activity长。
+  3.1、Activity实现了ViewModelStoreOwner接口，实现了接口唯一的方法 getViewModelStore
+        //在返回ViewModelStore对象前，会有一个 ensureViewModelStore 操作
+	    public ViewModelStore getViewModelStore() {
+	    	...
+	        ensureViewModelStore();
+	        return mViewModelStore;
+	    }
+  3.2、ensureViewModelStore：先通过 getLastNonConfigurationInstance 获取 NonConfigurationInstances，再从NonConfigurationInstances里边获取 ViewModelStore对象，如果获取不到才创建ViewModelStore对象
+
+  3.3、NonConfigurationInstances对象从哪里来？
+   ① Activity重写了onRetainNonConfigurationInstance，这个方法有个Object的返回值。
+   ② 如果Activity的ViewModelStore对象不为空，就会创建NonConfigurationInstances对象，然后将ViewModelStore对象赋值给NonConfigurationInstances对象
+   ③ 然后将NonConfigurationInstances对象从 onRetainNonConfigurationInstance 方法中返回。
+  3.4、onRetainNonConfigurationInstance 是在哪里调用的？
+   ① 在 Activity#retainNonConfigurationInstances 里边调用的，该方法也是有个Object返回值。
+   ② 同样包装了一下 onRetainNonConfigurationInstance返回的Object对象之后，然后返回。
+  3.5、retainNonConfigurationInstances 又是在哪里调用的？
+   ① 在 ActivityThread#performDestroyActivity 里边调用的。
+   ② 将retainNonConfigurationInstances返回的Object对象，保存到了Activity对应的ActivityClientRecord里边（ActivityClientRecord#lastNonConfigurationInstances）
+      ActivityClientRecord对象只有在Activity真正销毁的时候才会被销毁。
+  3.6、那什么时候将NonConfigurationInstances对象恢复呢？
+   ① 在 ActivityThread#performLaunchActivity 会从ActivityClientRecord中取出来
+   ② 通过Activity#attach()将NonConfigurationInstances对象给Activity.mLastNonConfigurationInstances，进而取到ViewModelStore。
+
+  3.4、ViewModelStore是在什么时候创建的？
+   ViewModelStore创建都是通过 ensureViewModelStore 方法创建的
+   ensureViewModelStore方法在 ViewModelStoreOwner#getViewModelStore 以及 Activity生命周期变化的时候被调用
+   ① ViewModelStore要被使用的时候创建
+   ② Activity生命周期变化的时候也会创建
+```
+
+
+
+##### Lifecycle
+
+```java
+Lifecycle：Lifecycle包含有关Activity与Fragment生命周期状态的信息，并允许其他对象观察此状态。
+作用：
+1、监听Activity与Fragment的生命周期变化，在变化时能及时通知其他组件；
+2、可以有效的避免内存泄漏和解决android生命周期的常见难题；
+
+场景：
+1、Glide在Activity/Fragment处于前台的时候加载图片，不可见的状态下停止图片的加载。
+   Glide在早期的做法添加一个隐形的fragment来感知生命周期变化，老麻烦了。
+2、RxJava的Disposable能够在Activity/Fragment销毁是自动dispose。
+3、自定义View想要感知Activity/Fragment的生命周期
+
+原理总结：
+Activity实现LifecycleOwner变成  被观察者
+某个对象实现LifecycleObserver变成 观察者
+
+通过Activity的Lifecycle，Lifecycle#addObserver(LifecycleObserver) 进行订阅
+Activity的生命周期变化的时候（29-添加空Fragment、29+注册生命周期回调监听），通知订阅的LifecycleObserver
+
+原理：以Activity为例
+1、Activity实现了LifecycleOwner接口，接口只有一个方法getLifecycle，该方法需要返回Lifecycle对象
+2、Activity实现了自己的Lifecycle对象并在getLifecycle方法中返回（Activity变成了被观察者）
+3、我们想要某个对象接收到Activity的生命周期变化，就需要变成观察者。
+   做法是该对象实现LifecycleObserver接口，然后利用Activity的getLifecycle.addObserver进行订阅
+4、Activity的Lifecycle里边维护了一个 LifecycleObserver 容器，addObserver操作就是将LifecycleObserver添加到这个容器中
+5、Activity#onCreate的时候会执行 ReportFragment#injectIfNeededIn
+   ReportFragment#injectIfNeededIn：
+      api29以下：添加一个空白的ReportFragment（类型Glide的做法）
+      api29以上：Activity#registerActivityLifecycleCallbacks 直接注册回调来获取Activity的生命周期回调
+6、当Activity的生命周期变化的时候，就会遍历容器通知到每个容器中的LifecycleObserver
+```
+
+
+
+
+
 #### Google支付
 
 ##### 说说Google支付流程
@@ -737,12 +1000,4 @@ private static final Map<Class<?>, SubscriberInfo> SUBSCRIBER_INDEX;
 EventBusBuilder.addIndex(new AAAIndex())：添加索引类
 那么在register(obj)的时候，就会走索引方式查找订阅方法，而不是通过大量的反射。从而提高性能。
 ```
-
-
-
-
-
-#### Databinding
-
-1. 说说databinding的原理。
 

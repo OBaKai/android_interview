@@ -1005,7 +1005,7 @@ Fragment重新创建的时候，由于什么原因（例如横竖屏切换）导
 ##### Fragment的replace和add方法的区别。
 
 ```java
-replace：替换Fragment，也就是先移除再添加。生命周期内获取获取数据，使用replace会重复获取。
+replace：替换Fragment，也就是先移除再添加。生命周期内获取数据，使用replace会重复获取。
 add：添加Fragment，只是覆盖上一个Fragment。add一般会伴随hide()和show()，避免布局重叠。
 添加相同Fragment的时候，用replace不会有任何变化，而add会抛异常。
 使用add如果应用放在后台或以其他方式被系统销毁，再打开时，hide()中引用的fragment会销毁，所以依然会出现布局重叠bug，可以使用replace或使用add时，添加一个tag参数。
