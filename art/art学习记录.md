@@ -7,9 +7,72 @@
 ```java
 ELF：Executable and Linkable Format的缩写，其中的“Executable”和“Linkable”表明ELF文件有两种重要的特性。
 Executable：可执行。ELF文件将参与程序的执行（Execution）工作。包括二进制程序的运行以及动态库.so文件的加载。Linkable：可链接。ELF文件是编译链接工作的重要参与者。
+  
+  
+Linking View：链接视图，它是从编译链接的角度（可重定位文件）来观察一个ELF文件应该包含什么内容。
+Execution View：执行视图，它是从执行的角度（可执行文件或动态库文件）来观察一个ELF文件应该包含什么信息。
+  
+  
+ELF文件的三种类型
+1、可重定位的文件(Relocatable file) - .o文件（符号为ET_REL）
+	 可执行文件里面包含了可以运行的程序代码
+	 汇编器汇编生成的.o文件（只编译不链接的文件）。经链接处理后，可生成 一个可执行文件 或 一个共享文件。
+  
+2、可执行得文件(Executable file) - 可执行文件（符号为ET_EXEC）
+   可执行文件里面包含了可以运行的程序代码 
+  
+3、可被共享的文件(Shared object file) - .so文件（符号为ET_DYN）
+   动态库文件里面也包含了可用于链接的代码和程序。
+
+
+由汇编程序和链接编辑器生成的目标文件是可以在CPU上执行的二进制表示程序。
+目标文件统一遵守ELF格式。但是不同的系统架构，ELF里面的格式和数据处理方式会略有不同。
+但是基本上格式如下：
+
+可重定向文件的格式：Header + Sections（节数组） + Section Header Table
+可执行文件的格式：Header + Segments（段数组） + Program Header Table
+ 	可重定向文件中的节（Section）和可执行文件中的段（Segment）都是存储了程序的代码部分、数据部分等。
+ 	区别是可执行目标文件中的某个段就是结合了很多可重定向目标文件中的相关节。
+  
+  
+查看命令：
+ELF Header查看：readelf -h 目标文件
+ELF Sections查看：readelf -S 目标文件
+ELF Segments查看：readelf -l 目标文件
 ```
 
 
+
+### ELF Header
+
+```java
+ELF Header:
+  Magic:   7f 45 4c 46 02 01 01 00 00 00 00 00 00 00 00 00 
+  Class:                             ELF64
+  Data:                              2's complement, little endian
+  Version:                           1 (current)
+  OS/ABI:                            UNIX - System V
+  ABI Version:                       0
+  Type:                              DYN (Shared object file)
+  Machine:                           AArch64
+  Version:                           0x1
+  Entry point address:               0x690 //入口点地址
+  Start of program headers:          64 (bytes into file) //程序头起点
+  Start of section headers:          24328 (bytes into file)
+  Flags:                             0x0
+  Size of this header:               64 (bytes) //本头的大小
+  Size of program headers:           56 (bytes) //程序头大小
+  Number of program headers:         8
+  Size of section headers:           64 (bytes) //节头大小
+  Number of section headers:         30 //节头数量
+  Section header string table index: 27 //字符串表索引节头
+```
+
+
+
+### Linking View下的ELF（Sections）
+
+### Execution View下的ELF（Segments）
 
 
 
