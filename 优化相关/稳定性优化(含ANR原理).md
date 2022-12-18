@@ -84,7 +84,7 @@ ANS通知app走每一个生命周期之前都会安放定时炸弹，app走完�
 触摸事件周期内做了耗时操作，触发了IuputDispather的检测机制。
 
 ① 如果在dispatchTouchEvent, onTouchEvent等处于consumeEvents调用链中执行耗时操作，即使未达到5s，也可能因为事件累计导致ANR。导致ANR的条件是在有PendingEvent时，WaitQueue中累积事件的总处理时长大于5s。
-	② 如果在ButtonClicked等非consumeEvents调用链中执行耗时操作，一定是大于5s（且有PendingEvent）才会触发ANR。
+② 如果在ButtonClicked等非consumeEvents调用链中执行耗时操作，一定是大于5s（且有PendingEvent）才会触发ANR。
 ```
 
 

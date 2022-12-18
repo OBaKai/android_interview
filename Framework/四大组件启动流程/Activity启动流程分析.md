@@ -1,3 +1,42 @@
+## 注意
+
+### 为什么Zygote与AMS之间是用Socket通信，而不是用Binder？
+
+```java
+1、Socket比Binder性能更好？更安全？
+反驳：
+性能：Binder数据拷贝只需要拷贝一次，而Socket是要两次的。
+安全：Binder：系统会为应用分配UID，可以同时支持实名和匿名。实名：系统服务是实名的。匿名：自定义的Service（其他进程拿不到）
+	   Socket：依赖上层协议，访问接入点是开放性的，不安全。
+
+  
+2、Zygote进程没办法用Binder？
+观点：
+  Zygote是Linux层就有的，而Binder是android层才有的。会不会Zygote启动的时候，还没有Binder呢？
+反驳：
+  ServiceManager是一个守护进程，它维护着系统服务和客户端的Binder通信。Binder机制是基于   ServiceManager的。
+  ServiceManager在init进程启动后启动，Zygote进程在init之后。ServiceManager进程的启动远比zygote要 早。
+  在启动Zygote进程是需要用到ServiceManager进程的服务，那么显然Zygote是可以使用Binder的。
+
+  
+3、fork函数限制（多线程程序里不准使用fork）？
+观点：
+  怕父进程binder线程有锁，然后子进程的主线程一直在等其子线程(从父进程拷贝过来的子进程)的资源，但是其实父	 进程的子进程并没有被拷贝过来，造成死锁。所以fork不允许存在多线程。
+  而非常巧的是Binder通讯偏偏就是多线程，所以干脆父进程（Zygote）这个时候就不使用binder线程。
+
+反驳：
+  应该是有办法让Zygote主线程直接作为一个唯一的Binder线程。
+  让init启动Zygote时直接将Zygote主线程注册成Binder线程并且是唯一线程。
+
+  
+所有我感觉，Zygote应该是可以用Binder替换Socket。
+网上很多都是偏向于 -> Binder是多线程的所以不能用在有fork的Zygote中。
+```
+
+
+
+
+
 ## Activity启动流程
 
 #### 总结
