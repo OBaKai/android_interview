@@ -49,9 +49,10 @@ ConstrainProxy是一个广播接收者，ConstrainProxy有很多子类都对应�
 
 ##### LiveData
 
+###### LiveData总结
+
 ```java
 MediatorLiveData实现红点的统一管理：https://juejin.cn/post/6945419430176227359
-
 
 LiveData：一个可被观察的数据持有者类
 特点：
@@ -68,8 +69,13 @@ LiveData能够感知组件的生命周期，它可以在组件处于激活状态
 比如Activity的生命周期，LiveData能确保仅在Activity处于活动状态下（生命周期处于onStart与onResume时）才会更新，也就是说当观察者处于活动状态，才会去通知数据更新，当生命周期处于onStop或者onPause时，不回调数据更新，直至生命周期为onResume时，立即回调。
 3、Activity/Fragment销毁掉时不会引起崩溃
 这是因为组件处于非激活状态时，在界面不会收到来自LiveData的数据变化通知。这样规避了很多因为页面销毁之后，修改UI导致的crash。
+```
 
 
+
+###### LiveData原理
+
+```java
 原理总结：LiveData即时观察者，也是被观察者
 LiveData是观察者：能够观察UI组件的生命周期
 Activity/Fragment 被观察者（订阅过程是通过Lifecycle机制实现的。）
@@ -110,14 +116,25 @@ ObserverWrapper existing = mObservers.putIfAbsent(observer, wrapper);
       observer.mLastVersion = mVersion;
 
 
+
+```
+
+###### LiveData粘性事件问题
+
+```java
 LiveData产生粘性事件的原因：
 场景：ActivityA中LiveData#setValue(1)后，启动ActivityB后进行LiveData的订阅，ActivityB能够收到这个1的数据。
 原因：Lifecycle机制
 ActivityB启动后走完onStart生命周期，Lifecycle机制会给订阅它的观察者们更新生命周期状态。其中就包括了LiveData的这个观察者。
 在onStart状态更新后LiveData就会去触发一次数据分发。
 解决：通过反射更新一下observer的mLastVersion就行了
+```
 
 
+
+###### LiveData防递归设计
+
+```java
 LiveData防递归设计：
 场景：
 liveData.setValue(1); //① 更新数据1，分发逻辑是遍历容器给观察者a、b分发数据
@@ -156,6 +173,64 @@ void dispatchingValue(ObserverWrapper initiator) {
         } while (mDispatchInvalidated);
         mDispatchingValue = false;
 }
+```
+
+###### postValue丢事件问题
+
+```java
+相关文章：https://zhuanlan.zhihu.com/p/461314535
+
+问题：
+postValue("aaa");
+postValue("bbb");
+实际只收到了bbb。期望应该先收到aaa再收到bbb
+
+原因：postTask标志位作怪
+1、执行postValue("aaa")
+2、由于mPendingData是NOT_SET（Runnable执行会setValue，然后会让mPendingData会变成NOT_SET），所以postTask标志位为true
+3、mPendingData = "aaa"
+4、执行main thread postRunnable(mPostValueRunnable)，返回了。
+5、执行postValue("bbb")
+6、由于mPendingData不是NOT_SET（mPendingData现在是"aaa"，因为postRunnable是异步的，不是立即执行），所以postTask为false
+7、mPendingData = "bbb"
+8、postTask为false，直接返回了。不执行postRunnable。
+  
+...一段时间后，执行 mPostValueRunnable 这个Runnable
+1、获取 mPendingData 值（值为"bbb"）
+2、mPendingData设为NOT_SET
+3、setValue((T) newValue)（走setValue逻辑分发事件）
+  
+最后导致只会收到最新的那个 postValue("bbb")
+  
+protected void postValue(T value) {
+        boolean postTask;
+        synchronized (mDataLock) {
+            postTask = mPendingData == NOT_SET;
+            mPendingData = value;
+        }
+        if (!postTask) {
+            return;
+        }
+        ArchTaskExecutor.getInstance().postToMainThread(mPostValueRunnable);
+    }
+
+private final Runnable mPostValueRunnable = new Runnable() {
+        @Override
+        public void run() {
+            Object newValue;
+            synchronized (mDataLock) {
+                newValue = mPendingData;
+                mPendingData = NOT_SET;
+            }
+            setValue((T) newValue);
+        }
+    };
+
+为什么LiveData这样设计？
+我举得，LiveData强调的是Data，更关注数据，而不是关注过程。
+关注数据那么就会稍微忽略过程，从 postValue 方法体现出来。
+同一时间不管post多少次，只会为你保证能更新到最新的那个数据，中途的多次变化忽略。
+这样设计的好处是，减轻主线程消息队列的消息处理压力。
 ```
 
 

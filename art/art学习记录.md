@@ -1,5 +1,3 @@
-
-
 ## elf文件学习
 
 ### 概要
@@ -33,12 +31,19 @@ ELF文件的三种类型
 可执行文件的格式：Header + Segments（段数组） + Program Header Table
  	可重定向文件中的节（Section）和可执行文件中的段（Segment）都是存储了程序的代码部分、数据部分等。
  	区别是可执行目标文件中的某个段就是结合了很多可重定向目标文件中的相关节。
+```
+
+
+
+### 常用命令
+
+```java
+Header查看：readelf -h 目标文件
+Section Header Table查看：readelf -S 目标文件
+Program Header Table查看：readelf -l 目标文件
   
-  
-查看命令：
-ELF Header查看：readelf -h 目标文件
-ELF Sections查看：readelf -S 目标文件
-ELF Segments查看：readelf -l 目标文件
+某个Section的查看：readelf -x Section名 目标文件
+符号表查看：readelf -s 目标文件
 ```
 
 
@@ -70,9 +75,509 @@ ELF Header:
 
 
 
-### Linking View下的ELF（Sections）
+### Section 与 Segment 的区别
 
-### Execution View下的ELF（Segments）
+```java
+可执行文件和动态库文件由多个Segment + 程序头表组成
+  
+Segment可以看作是多个.o文件中的相似Section的合并，即一个Segment包含一个或多个属性相似的Section
+  
+这里的属性相似更多是指权限，比如链接器会把多个.o文件中的都具有可读可执行的.text和.init段都放在最终可执行文件中的一个Segment内，这样的好处就是可以更多的节省内存空间。这个原因是由于ELF文件被加载时，是以系统的页长度为单位，如果一个Segment的长度小于一个页大小，那么这个Segment也要占据整个页大小。连接器对具有相同权限的段Section合并到一个段Segment后，就可以尽可能的减少内存碎片。
+```
+
+
+
+### Linking View下的ELF（Section Header Table）
+
+```java
+There are 30 section headers, starting at offset 0x5f08: //30个节，从偏移量 0x5f08 开始
+
+Section Headers:
+  //Name：Section名，就是个字符串，每个Section功能都不同，比如.text存放代码、.data存放数据
+  //Type：Section类型
+  //Address：Section被加载到进程中的虚拟地址，由于还没加载所有都是0。
+  //Offset：Section在ELF文件中的偏移
+  //Size：Section的大小
+  //EntSize：某些节区中包含固定大小的项目，如符号表。对于这类节区，此成员给出每个表项的长度字节数。
+  //Flags：进程虚拟空间中的属性，是否可读、可写、可执行。比如代码段.text的标志位为AX代表alloc+execute，表示该段需要在内存开辟空间并且权限为可执行。
+  //Link & Info：具体含义依赖于依赖于Type，Link此成员给出节区头部表索引链接，Info此成员给出附加信息
+  //Align：就指定了对齐方式。比如.text段的Align值为16就代表该段在内存的必须以16对齐存放，即存放该段的内存起始地址必须可以被16整除。
+  [Nr] Name              Type             Address           Offset
+       Size              EntSize          Flags  Link  Info  Align
+    
+  [ 0]                   NULL             0000000000000000  00000000
+       0000000000000000  0000000000000000           0     0     0
+  [ 1] .note.gnu.build-i NOTE             0000000000000200  00000200
+       0000000000000024  0000000000000000   A       0     0     4
+  [ 2] .hash             HASH             0000000000000228  00000228
+       0000000000000054  0000000000000004   A       4     0     8
+  [ 3] .gnu.hash         GNU_HASH         0000000000000280  00000280
+       000000000000004c  0000000000000000   A       4     0     8
+  [ 4] .dynsym           DYNSYM           00000000000002d0  000002d0
+       0000000000000180  0000000000000018   A       5     3     8
+  [ 5] .dynstr           STRTAB           0000000000000450  00000450
+       00000000000000cb  0000000000000000   A       0     0     1
+  [ 6] .gnu.version      VERSYM           000000000000051c  0000051c
+       0000000000000020  0000000000000002   A       4     0     2
+  [ 7] .gnu.version_r    VERNEED          0000000000000540  00000540
+       0000000000000020  0000000000000000   A       5     1     8
+  [ 8] .rela.dyn         RELA             0000000000000560  00000560
+       0000000000000048  0000000000000018   A       4     0     8
+  [ 9] .rela.plt         RELA             00000000000005a8  000005a8
+       0000000000000078  0000000000000018  AI       4    19     8
+  [10] .plt              PROGBITS         0000000000000620  00000620
+       0000000000000070  0000000000000010  AX       0     0     16
+  [11] .text             PROGBITS         0000000000000690  00000690
+       0000000000000244  0000000000000000  AX       0     0     4
+  [12] .rodata           PROGBITS         00000000000008d4  000008d4
+       000000000000003f  0000000000000001 AMS       0     0     1
+  [13] .eh_frame_hdr     PROGBITS         0000000000000914  00000914
+       0000000000000024  0000000000000000   A       0     0     4
+  [14] .eh_frame         PROGBITS         0000000000000938  00000938
+       0000000000000078  0000000000000000   A       0     0     8
+  [15] .note.android.ide NOTE             00000000000009b0  000009b0
+       0000000000000098  0000000000000000   A       0     0     4
+  [16] .fini_array       FINI_ARRAY       0000000000001db0  00000db0
+       0000000000000010  0000000000000008  WA       0     0     8
+  [17] .data.rel.ro      PROGBITS         0000000000001dc0  00000dc0
+       0000000000000008  0000000000000000  WA       0     0     8
+  [18] .dynamic          DYNAMIC          0000000000001dc8  00000dc8
+       00000000000001f0  0000000000000010  WA       5     0     8
+  [19] .got              PROGBITS         0000000000001fb8  00000fb8
+       0000000000000048  0000000000000008  WA       0     0     8
+  [20] .comment          PROGBITS         0000000000000000  00001000
+       00000000000000b5  0000000000000001  MS       0     0     1
+  [21] .debug_info       PROGBITS         0000000000000000  000010b5
+       0000000000002978  0000000000000000           0     0     1
+  [22] .debug_abbrev     PROGBITS         0000000000000000  00003a2d
+       0000000000000151  0000000000000000           0     0     1
+  [23] .debug_line       PROGBITS         0000000000000000  00003b7e
+       00000000000002ef  0000000000000000           0     0     1
+  [24] .debug_str        PROGBITS         0000000000000000  00003e6d
+       0000000000001597  0000000000000001  MS       0     0     1
+  [25] .debug_macinfo    PROGBITS         0000000000000000  00005404
+       0000000000000001  0000000000000000           0     0     1
+  [26] .debug_ranges     PROGBITS         0000000000000000  00005405
+       0000000000000040  0000000000000000           0     0     1
+  [27] .shstrtab         STRTAB           0000000000000000  00005dd3
+       0000000000000130  0000000000000000           0     0     1
+  [28] .symtab           SYMTAB           0000000000000000  00005448
+       0000000000000768  0000000000000018          29    66     8
+  [29] .strtab           STRTAB           0000000000000000  00005bb0
+       0000000000000223  0000000000000000           0     0     1
+Key to Flags:
+  W (write), A (alloc), X (execute), M (merge), S (strings), I (info),
+  L (link order), O (extra OS processing required), G (group), T (TLS),
+  C (compressed), x (unknown), o (OS specific), E (exclude),
+  p (processor specific)
+```
+
+
+
+#### Section Type
+
+| 类型     | 含义                                                         |
+| -------- | ------------------------------------------------------------ |
+| NULL     | 无效段，忽略                                                 |
+| PROGBITS | 程序段。包括代码段、数据段、调试信息等，对应的段名有.text .data .pdr .common等。 |
+| SYMTAB   | 符号表段。对应的段名是.symtab，里面存放了链接过程需要的所有符号信息。后面有详细介绍。 |
+| STRTAB   | 字符串表段。包括.strtab和.shstrtab。.strtab用来保存ELF文件中一般的字符串，如变量名、函数名等。.shstrtab用于保存段表中用到的字符串，如段名Name。 |
+| RELA     | 重定位表段 （with explicit addends）。存放那些代码段和数据段中有绝对地址引用的相关信息，用于链接器的重定位。对应的段名有.rela.text .rela.data等 |
+| HASH     | 符号表的哈希表                                               |
+| DYNAMIC  | 动态链接信息                                                 |
+| NOTE     | 提示性信息                                                   |
+| NOBITS   | 表示该段在文件中无内容，比如.bss段                           |
+| REL      | 重定位表段（without explicit addends）。对应的段名有.rel.text .rel.data等 |
+| SHLIB    | 保留                                                         |
+| DNYSYM   | 动态链接的符号表                                             |
+
+
+
+#### 常见的Section简介
+
+| Section名          | 描述                                                         |
+| ------------------ | ------------------------------------------------------------ |
+| .text              | 常称为代码段，用于存放程序的可执行机器指令                   |
+| .data 和.data1     | 数据段，用于存放程序中已经初始化的数据                       |
+| .rodata和 .rodata1 | 只读数据段，用于存放只读数据，如const类型变量和字符串常量    |
+| .bss               | 用于存放未初始化的全局变量和局部静态变量                     |
+| .common            | 用于存放编译器的版本信息                                     |
+| .hash              | 符号哈希表                                                   |
+| .dynamic           | 动态链接信息                                                 |
+| .strtab            | 字符串表，用来存放变量名、函数名等字符串。                   |
+| .symtab            | 符号表，用于保存变量、函数等符号值。                         |
+| .shstrtab          | 段名表，用于保存段名信息，如“.text” “.data”等                |
+| .plt 和 .got       | 动态链接的跳转表和全局入口表。got保存了全局偏移表，.got和.plt一起提供了对导入的共享库函数的访问入口，由动态链接器在运行时进行修改。 |
+| .init 和 .fini     | 程序初始化和终结代码段                                       |
+
+
+
+### Execution View下的ELF（Program Header Table）
+
+```java
+Elf file type is DYN (Shared object file) //Elf文件类型为共享文件
+Entry point 0x690 //入口地址 0x690
+There are 8 program headers, starting at offset 64 //有8个段，偏移量64
+
+Program Headers:
+//Type：段类型分为LOAD、DYNAMIC、NOTE、NULL等。LOAD类型的Segment是需要被加载到内存的。
+//Offset：此段在ELF文件中的偏移
+//VirtAddr：此段在进程内存中的起始地址，由于没加载到内存所有都是0
+//FileSiz：此段在ELF文件所占的大小
+//PhysAddr：此段的物理地址。对于可执行文件和动态库文件而言这个值并没有意义，因为系统用的是虚拟地址，不会使用物理地址。
+//MemSiz：此Segment在进程内存中所占的长度
+//Flags：权限属性包括可读R、可写W和可执行X
+//Align：此段在内存加载时的对齐方式。其值为2的Align次方。比如上面的Align值为4，那么对齐要求就是16。
+  Type           Offset             VirtAddr           PhysAddr
+                 FileSiz            MemSiz              Flags  Align
+  LOAD           0x0000000000000000 0x0000000000000000 0x0000000000000000
+                 0x0000000000000a48 0x0000000000000a48  R E    1000
+  LOAD           0x0000000000000db0 0x0000000000001db0 0x0000000000001db0
+                 0x0000000000000250 0x0000000000000250  RW     1000
+  DYNAMIC        0x0000000000000dc8 0x0000000000001dc8 0x0000000000001dc8
+                 0x00000000000001f0 0x00000000000001f0  RW     8
+  NOTE           0x0000000000000200 0x0000000000000200 0x0000000000000200
+                 0x0000000000000024 0x0000000000000024  R      4
+  NOTE           0x00000000000009b0 0x00000000000009b0 0x00000000000009b0
+                 0x0000000000000098 0x0000000000000098  R      4
+  GNU_EH_FRAME   0x0000000000000914 0x0000000000000914 0x0000000000000914
+                 0x0000000000000024 0x0000000000000024  R      4
+  GNU_STACK      0x0000000000000000 0x0000000000000000 0x0000000000000000
+                 0x0000000000000000 0x0000000000000000  RW     10
+  GNU_RELRO      0x0000000000000db0 0x0000000000001db0 0x0000000000001db0
+                 0x0000000000000250 0x0000000000000250  R      1
+
+ Section to Segment mapping:
+  Segment Sections...
+   00     .note.gnu.build-id .hash .gnu.hash .dynsym .dynstr .gnu.version .gnu.version_r .rela.dyn .rela.plt .plt .text .rodata .eh_frame_hdr .eh_frame .note.android.ident 
+   01     .fini_array .data.rel.ro .dynamic .got 
+   02     .dynamic 
+   03     .note.gnu.build-id 
+   04     .note.android.ident 
+   05     .eh_frame_hdr 
+   06     
+   07     .fini_array .data.rel.ro .dynamic .got 
+```
+
+
+
+#### 可执行文件与进程虚拟空间映射关系
+
+![](./assets/elf映射到进程.png)
+
+```java
+ELF格式的文件在映射入进程时，ELF头和一个调试信息是不再需要的。只需要加载部分段（Segment）到内存，具体就是加载类型为LOAD的段即可。
+VMA（Virtual Memorry Area）即虚拟地址空间。
+  
+实际开发中，我们还可以通过 /proc/pid/maps 来查看一个进程的虚拟空间分布
+
+root@x86:/ # cat /proc/1427/maps
+...
+a24f0000-a2bff000 r--p 00000000 08:13 5931027    /data/app/com.llk.jni-1/oat/x86/base.odex
+a2bff000-a2c00000 rw-p 0070f000 08:13 5931027    /data/app/com.llk.jni-1/oat/x86/base.odex
+...
+b720f000-b7304000 r-xp 00000000 08:06 1299       /system/lib/libc.so
+b7304000-b7305000 ---p 00000000 00:00 0 
+b7305000-b7309000 r--p 000f5000 08:06 1299       /system/lib/libc.so
+b7309000-b730c000 rw-p 000f9000 08:06 1299       /system/lib/libc.so
+b730c000-b7318000 rw-p 00000000 00:00 0 
+b7318000-b73fc000 r-xp 00000000 08:06 1298       /system/lib/libc++.so
+b73fc000-b73fd000 ---p 00000000 00:00 0 
+b73fd000-b7401000 r--p 000e4000 08:06 1298       /system/lib/libc++.so
+b7401000-b7402000 rw-p 000e8000 08:06 1298       /system/lib/libc++.so
+b7402000-b7403000 rw-p 00000000 00:00 0 
+...
+  
+b720f000-b7304000：VMA的地址范围
+r-xp：WMA的权限，分为可读r、可写w、可执行x、私有p、可共享s
+00000000：WMA对应的Segment在映射文件中的偏移
+08:06：表示映像文件所在设备的主设备号和次设备号
+1299：映像文件的节点号
+/system/lib/libc.so：映像文件的路径
+```
+
+
+
+
+
+### .dynsym & .symtab Section（符号表）
+
+#### 什么是符号（Symbol）
+
+```java
+在链接器中，函数和变量统称为符号（Symbol）,函数名和变量名称为符号名（Symbol Name）。符合可以分为如下种类：
+1、局部符号：类似于函数内部定义的静态局部变量，类似于下面的变量a,b。这类符号只在编译单元内部可见。
+int fun(){
+ static int a,b;
+}
+
+2、全局符号：定义在本目标文件的全局符号，可以被其他文件引用。例如下面的global_var 、main：
+int global_var;
+int main(int arg ,char* arg[]){}
+
+3、外部符号(External Symbol)：在本目标文件中引用的全局符号。比如我们经常使用的printf函数，它是定义在模块libc内的符号。
+```
+
+
+
+#### 符号表长什么样
+
+```java
+Symbol table '.dynsym' contains 16 entries: //.dynsym有16个符号
+//Name：最后一列。没有名字的符号是段，从列Type的SECTION可以看出。
+//Value：每个符号都有一个对应的值，如果此符号是一个函数、变量，那么符号的值就是函数和变量的地址。可执行文件 或 动态文件中，符号值可能是符号的虚拟地址、符号所在函数偏移等。
+//Size：对于变量，符号大小是数据类型的大小，比如int变量的size为4。对于函数，符号大小是该函数中所有指令的字节数
+
+/* Type：符号类型
+NOTYPE：未知符号类型
+OBJECT：表示该符号是个数据对象，比如变量、数组等。
+FUNC：表示该符号是个函数或其他可执行代码。
+SECTION：表示该符号为一个段。
+FILE：该符号表示文件名。*/
+
+/* Bind：符号绑定信息种类
+LOCAL：局部符号。
+GLOBAL：全局符号，如上面定义的全局变量global_var、函数main、printf
+WEAK：弱引用符号。在这里没有体现。对于C/C++语言，编译器默认函数和已经初始化的全局变量为强符号。而未初始化的全局变量和使用__attribute__((weak))定义的变量为弱符号。 */
+
+/* Ndx：符号所在段，如果符号定义在本目标文件中，那么这个成员表示符号所在的段在段表中的下标。Ndx还有如下特殊值：
+UND：就表示这是个外部符号，不再本目标文件中定义
+ABS：表示该符号包含了一个绝对值
+COM：表示该符号是个未初始化的全局符号。*/
+   Num:    Value          Size Type    Bind   Vis      Ndx Name
+     0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND 
+     1: 0000000000000690     0 SECTION LOCAL  DEFAULT   11 
+     2: 0000000000001dc0     0 SECTION LOCAL  DEFAULT   17 
+     3: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND __cxa_finalize@LIBC (2)
+     4: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND __stack_chk_fail@LIBC (2)
+     5: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND __cxa_atexit@LIBC (2)
+     6: 0000000000002000     0 NOTYPE  GLOBAL DEFAULT  ABS _bss_end__
+     7: 0000000000002000     0 NOTYPE  GLOBAL DEFAULT  ABS _edata
+     8: 0000000000002000     0 NOTYPE  GLOBAL DEFAULT  ABS _end
+     9: 0000000000002000     0 NOTYPE  GLOBAL DEFAULT  ABS __bss_start
+    10: 0000000000002000     0 NOTYPE  GLOBAL DEFAULT  ABS __bss_end__
+    11: 00000000000006cc   172 FUNC    GLOBAL DEFAULT   11 doJavaHookInit
+    12: 0000000000000778   172 FUNC    GLOBAL DEFAULT   11 doJavaHookFunction
+    13: 0000000000000824   176 FUNC    GLOBAL DEFAULT   11 JNI_OnLoad
+    14: 0000000000002000     0 NOTYPE  GLOBAL DEFAULT  ABS __end__
+    15: 0000000000002000     0 NOTYPE  GLOBAL DEFAULT  ABS __bss_start__
+
+Symbol table '.symtab' contains 79 entries: //.symtab有79个符号
+   Num:    Value          Size Type    Bind   Vis      Ndx Name
+     0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND 
+     1: 0000000000000200     0 SECTION LOCAL  DEFAULT    1 
+     2: 0000000000000228     0 SECTION LOCAL  DEFAULT    2 
+     3: 0000000000000280     0 SECTION LOCAL  DEFAULT    3 
+     4: 00000000000002d0     0 SECTION LOCAL  DEFAULT    4 
+     5: 0000000000000450     0 SECTION LOCAL  DEFAULT    5 
+     6: 000000000000051c     0 SECTION LOCAL  DEFAULT    6 
+     7: 0000000000000540     0 SECTION LOCAL  DEFAULT    7 
+     8: 0000000000000560     0 SECTION LOCAL  DEFAULT    8 
+     9: 00000000000005a8     0 SECTION LOCAL  DEFAULT    9 
+    10: 0000000000000620     0 SECTION LOCAL  DEFAULT   10 
+    11: 0000000000000690     0 SECTION LOCAL  DEFAULT   11 
+    12: 00000000000008d4     0 SECTION LOCAL  DEFAULT   12 
+    13: 0000000000000914     0 SECTION LOCAL  DEFAULT   13 
+    14: 0000000000000938     0 SECTION LOCAL  DEFAULT   14 
+    15: 00000000000009b0     0 SECTION LOCAL  DEFAULT   15 
+    16: 0000000000001db0     0 SECTION LOCAL  DEFAULT   16 
+    17: 0000000000001dc0     0 SECTION LOCAL  DEFAULT   17 
+    18: 0000000000001dc8     0 SECTION LOCAL  DEFAULT   18 
+    19: 0000000000001fb8     0 SECTION LOCAL  DEFAULT   19 
+    20: 0000000000000000     0 SECTION LOCAL  DEFAULT   20 
+    21: 0000000000000000     0 SECTION LOCAL  DEFAULT   21 
+    22: 0000000000000000     0 SECTION LOCAL  DEFAULT   22 
+    23: 0000000000000000     0 SECTION LOCAL  DEFAULT   23 
+    24: 0000000000000000     0 SECTION LOCAL  DEFAULT   24 
+    25: 0000000000000000     0 SECTION LOCAL  DEFAULT   25 
+    26: 0000000000000000     0 SECTION LOCAL  DEFAULT   26 
+    27: 0000000000000000     0 FILE    LOCAL  DEFAULT  ABS /buildbot/tmp/crtbrand-7a
+    28: 00000000000009b0     0 NOTYPE  LOCAL  DEFAULT   15 $d.0
+    29: 0000000000000a08     0 NOTYPE  LOCAL  DEFAULT   15 ndk_build_number
+    30: 00000000000009c8     0 NOTYPE  LOCAL  DEFAULT   15 ndk_version
+    31: 00000000000009b0   152 OBJECT  LOCAL  DEFAULT   15 note_android_ident
+    32: 00000000000009c4     0 NOTYPE  LOCAL  DEFAULT   15 note_data
+    33: 0000000000000a48     0 NOTYPE  LOCAL  DEFAULT   15 note_end
+    34: 00000000000009bc     0 NOTYPE  LOCAL  DEFAULT   15 note_name
+    35: 0000000000000000     0 FILE    LOCAL  DEFAULT  ABS crtbegin_so.c
+    36: 0000000000001dc0     0 NOTYPE  LOCAL  DEFAULT   17 $d.1
+    37: 0000000000001db0     0 NOTYPE  LOCAL  DEFAULT   16 $d.2
+    38: 0000000000001db8     0 NOTYPE  LOCAL  DEFAULT   16 $d.3
+    39: 00000000000000b4     0 NOTYPE  LOCAL  DEFAULT   20 $d.4
+    40: 0000000000000690     0 NOTYPE  LOCAL  DEFAULT   11 $x.0
+    41: 0000000000001dc0     8 OBJECT  LOCAL  DEFAULT   17 __dso_handle_const
+    42: 0000000000000690    12 FUNC    LOCAL  DEFAULT   11 __on_dlclose
+    43: 00000000000006a0     4 FUNC    LOCAL  DEFAULT   11 __on_dlclose_late
+    44: 0000000000000000     0 FILE    LOCAL  DEFAULT  ABS native-lib.c
+    45: 0000000000000938     0 NOTYPE  LOCAL  DEFAULT   14 $d.10
+    46: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   23 $d.11
+    47: 00000000000008d4     0 NOTYPE  LOCAL  DEFAULT   12 $d.3
+    48: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   24 $d.4
+    49: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   22 $d.5
+    50: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   21 $d.6
+    51: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   26 $d.7
+    52: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT   25 $d.8
+    53: 00000000000000b4     0 NOTYPE  LOCAL  DEFAULT   20 $d.9
+    54: 00000000000006cc     0 NOTYPE  LOCAL  DEFAULT   11 $x.0
+    55: 0000000000000778     0 NOTYPE  LOCAL  DEFAULT   11 $x.1
+    56: 0000000000000824     0 NOTYPE  LOCAL  DEFAULT   11 $x.2
+    57: 0000000000000000     0 FILE    LOCAL  DEFAULT  ABS 
+    58: 0000000000001dc8     0 OBJECT  LOCAL  DEFAULT  ABS _DYNAMIC
+    59: 00000000000006a4    12 FUNC    LOCAL  DEFAULT   11 __atexit_handler_wrapper
+    60: 0000000000000914     0 NOTYPE  LOCAL  DEFAULT   13 __GNU_EH_FRAME_HDR
+    61: 0000000000001ff8     0 OBJECT  LOCAL  DEFAULT  ABS _GLOBAL_OFFSET_TABLE_
+    62: 0000000000001dc0     8 OBJECT  LOCAL  DEFAULT   17 __dso_handle
+    63: 00000000000006b0    28 FUNC    LOCAL  DEFAULT   11 atexit
+    64: 000000000000069c     4 FUNC    LOCAL  DEFAULT   11 __emutls_unregister_key
+    65: 0000000000000620     0 NOTYPE  LOCAL  DEFAULT   10 $x
+    66: 00000000000006cc   172 FUNC    GLOBAL DEFAULT   11 doJavaHookInit
+    67: 0000000000002000     0 NOTYPE  GLOBAL DEFAULT  ABS _bss_end__
+    68: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND __cxa_finalize@@LIBC
+    69: 0000000000000778   172 FUNC    GLOBAL DEFAULT   11 doJavaHookFunction
+    70: 0000000000000824   176 FUNC    GLOBAL DEFAULT   11 JNI_OnLoad
+    71: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND __stack_chk_fail@@LIBC
+    72: 0000000000002000     0 NOTYPE  GLOBAL DEFAULT  ABS __bss_start
+    73: 0000000000002000     0 NOTYPE  GLOBAL DEFAULT  ABS __end__
+    74: 0000000000002000     0 NOTYPE  GLOBAL DEFAULT  ABS __bss_start__
+    75: 0000000000002000     0 NOTYPE  GLOBAL DEFAULT  ABS _edata
+    76: 0000000000002000     0 NOTYPE  GLOBAL DEFAULT  ABS __bss_end__
+    77: 0000000000002000     0 NOTYPE  GLOBAL DEFAULT  ABS _end
+    78: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND __cxa_atexit@@LIBC
+```
+
+
+
+#### .dynsym 与 .symtab的区别
+
+```java
+在大多数共享库和动态链接可执行文件中，存在两个符号表。即.dynsym和.symtab
+
+dynsym：保存了引用来自外部文件符号的全局符号。如printf库函数。
+symtab：除了包含dynsym里边的符号外，还保存了可执行文件的本地符号。如全局变量，代码中定义的本地函数等。
+也就是说dynsym是symtab所保存符合的子集。
+  
+dynsym是symtab的子集，那为什么要同时存在两个符号表呢？
+通过readelf -S命令查看，一部分节flags被标记为了A（ALLOC）、WA（WRITE/ALLOC）、AX（ALLOC/EXEC）。其中dynsym被标记为ALLOC，而symtab则没有标记。
+ALLOC表示有该标记的节会在运行时分配并装载进入内存，而symtab不是在运行时必需的，因此不会被装载到内存中。
+dynsym保存的符号只能在运行时被解析，因此是运行时动态链接器所需的唯一符号。
+dynsym对于动态链接可执行文件的执行是必需的，而symtab只是用来进行调试和链接的。
+```
+
+
+
+### .plt & .got Section
+
+##### 为什么需要GOT
+
+```java
+我们在程序内调用一个外部动态库的函数的时候，往往就需要知道这个函数的地址。
+  
+问题一：那我们能在编译的时候就确定这个函数的地址吗？
+不行。
+因为出于安全考虑，操作系统加载动态库到内存的时候并不会使用固定的位置，而是会基于一个随机数来计算最终的加载位置。
+每次动态库加载其内存地址都会变，那我们想要调用的函数的地址也肯定会变的
+
+  
+问题二：那不能在程序运行前，把所有用到的动态库都加载一遍吗？
+可以。但是会影响程序的启动速度。
+因为如果程序大量依赖了动态库，那么就需要等待加载完这些动态库才能够运行，岂不是很浪费时间。而且程序走某个逻辑可能只用到某几个动态库。
+所以最优的方式就是，用到某个外部函数再进行加载（懒加载方式）。
+  
+  
+因此我们需要借助一些辅助手段。
+GOT是Global Offset Table，Section名为.got。
+它是一个表，每一项存储的是该ELF文件用到的符号（函数或变量）的地址。
+  
+PLT是Procedure Linkage Table，Section名为.plt
+也是一种表结构，不过表项存储的是一段小小的Trampoline代码（跳板代码）
+  
+GOT用于解决问题一，PLT用于解决问题二
+```
+
+
+
+##### GOT表项
+
+```java
+特殊的 GOT[1] & GOT[2]
+GOT第2项和第3项内容由interpreter程序设置，即GOT[1]由runtime linker设置，GOT[2]为runtime linker对应的处理函数用于处理符号的解析，一般称之为Resolver。
+  
+这两项内容存储的是 解释器的信息 和 符号解析处理函数的入口地址。
+  
+GOT其余表项存储符号的地址（其余表项中的值将由Resolver动态填写。）
+  
+逻辑如下：
+第一次调用该外部函数时，将触发Interpreter的Resolver函数被调用，查找该外部符号的实际加载地址，并填充对应的GOT表，顺带调用该外部函数。
+第二次调用该外部函数时，即可直接通过GOT表获取到该外部函数加载地址，从而达到引用效果，不再需要查找。
+```
+
+
+
+##### PLT表项
+
+```java
+PLT表大致如下：
+.PLT0: //0项是存储跳转到GOT表Resolver的指令
+	pushl got_plus_4 //pushl got_plus_4 --> GOT[1]的地址压栈
+  jmp *got_plus_8 //jmp *got_plus_8 ---> 跳到GOT[2]所在地址存储的内容上，然后执行（也就是执行Resolver）
+  nop; nop
+  nop; nop
+.PLT1: //符号name1
+  jmp *name1_in_GOT //表示跳转到GOT[name1]所在地址存储的内容上然后执行，如果GOT[name1]已经是计算好的地址，直接跳转到目标地址
+  pushl $offset //将偏移量压榨（相当于传参，这个偏移是为了让Resolver知道要计算哪个符号的地址）
+  jmp .PLT0@PC //跳转到PLT[0]地址（其结果就是跳到Resolver）
+.PLT2: //符号name2
+  jmp *name2_in_GOT
+  pushl $offset
+  jmp .PLT0@PC
+```
+
+
+
+##### 符号地址的计算过程
+
+```java
+.rel.plt Section：存储重定项信息（我的理解是存放GOT项的地址信息）
+.got.plt Section：存储PLT项
+
+假设程序main函数，调用了外部动态库的test函数。
+
+<main>：
+push %ebp
+mov %ebp, %ebp
+and $0xfffffff0, %ebp
+call 8048430 <test@plt> //执行PLT的test项的代码
+...
+---------------------------------------------------------------
+.plt
+08048400 <plt0>:
+8048400 pushl 0x804a004 //GOT[0]地址压栈
+8048406 jmp *0x804a008 //跳转到GOT[1]
+804840c add %al, (%eax)
+
+08048430 <test@plt>: 
+8048430 jmp *0x804a014
+8048436 push $0x10
+804843b jmp 8048400
+---------------------------------------------------------------
+//ELF将GOT表分为.got和.got.plt，其没什么区别，存储的都是符号地址，只不过是.got.plt专门存储函数符号地址
+.got.plt 
+0x0804a000 0c9f0408 00000000 00000000 16840408
+0x0804a010 26840408 36840408 ........
+
+① main函数执行到 call 8048430，执行 8048430 地址的指令段，也就是执行 PLT[test]
+② PLT[test]首先执行 jmp *0x804a014，这里并不是跳转到 0x804a014，而是跳转到存储在该地址里边的内容，这个内容是也是地址。
+③ .got.plt 里边可看到 0x804a014 地址存储的内容是 36840408（这里也是需要倒过来看，也就是 08044836）
+   第一次调用函数由于还没计算地址，所有是会触发Resolver计算绝对地址
+④ 没错 08044836 就是我们PLT[test]的下一条指令的地址，也就是 push $0x10
+⑤ push $0x10 执行，将 0x10 压栈，0x10 刚好是.rel.plt Section中test符号的偏移量。因为Resolver需要知道自己该计算哪个符号的地址。
+⑥ jmp 8048400 执行，跳转到PLT[0]执行
+⑦ 当Resolver计算出test函数符号的地址后，它会把它回写到地址0x804a014处。如此，下一次再jmp到这个地址时，将直接跳转到目标函数test
+```
+
+
+
+
 
 
 
@@ -92,7 +597,7 @@ data：存放实际数据的地方（字符串常量、类定义、方法代码�
 
 
 
-![dex总览](/Users/jjleong/Public/my_github_repo/android_interview/art/assets/dex总览.png)
+![](./assets/dex总览.png)
 
 
 
@@ -102,7 +607,7 @@ data：存放实际数据的地方（字符串常量、类定义、方法代码�
 
 ###### Jvm虚拟机栈 - 栈帧中的 操作数栈 & 局部变量表
 
-![虚拟机栈结构](/Users/jjleong/Public/my_github_repo/android_interview/art/assets/虚拟机栈结构.png)
+![](./assets/虚拟机栈结构.png)
 
 ```java
 1、操作数栈 & 局部变量表 从哪里来？
