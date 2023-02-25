@@ -4,7 +4,7 @@
 可以，但是前提是这个线程的Looper是已经创建的（已经调用了 Looper#prepare）
 
 Handler在创建的时候，如果没有指定Looper的情况下，默认是获取当前线程的Looper。如果获取不到就抛异常。
-Looper是线程唯一的（ThreadLocalMap保证），每个线程只有一个Looper。 
+Looper是线程唯一的（ThreadLocal保证），每个线程只有一个Looper。 
 
 
 
@@ -128,7 +128,7 @@ MessageQueue#next（本次循环拿到的msg为空，或者 msg是个延时消�
 使用场景：
 Framework中使用场景：
 ① Activity#onResume里边设置IdleHandler去执行上一个Activity的onStop、onDestory
-② GcIdler：空闲的时候主动执行一次gc。地爱用时机：当AMS通知Activity#onResume 或 AMS发现内存就会叫app调用。
+② GcIdler：空闲的时候主动执行一次gc。调用时机：当AMS通知Activity#onResume 或 AMS发现内存不足就会叫app调用。
 ③ waitForIdle：监听当前线程是否空闲（异步）
 	先addIdleHandler，然后在post一个空的Runnable到handler里边。
 	为啥还要post：有可能当前已经是在空闲的休眠中了，本次空闲也不能落下。

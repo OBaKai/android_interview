@@ -87,7 +87,7 @@ native  BpBinder      BBinder
 最常见的就是两个应用进程之间的通讯了，通过客户端进程bindSerivce，AMS再向另外一个进程的Service组件请求发布Binder实体，客户端才能拿到Binder引用。
   
 2.3、介绍 service_manager进程
-① Binde的电话簿 - service_manager进程
+① Binder的电话簿 - service_manager进程
 就像我们想打电话给一个朋友，我们只记得他的名字，但是不记得他的号码，那我们就去电话簿对着名字找他号码就行了。
 
 ② 怎么与service_manager进程通讯？

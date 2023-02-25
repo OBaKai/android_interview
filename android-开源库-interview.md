@@ -56,7 +56,7 @@ MediatorLiveData实现红点的统一管理：https://juejin.cn/post/69454194301
 
 LiveData：一个可被观察的数据持有者类
 特点：
-1、数据可以被观察者订阅；
+1、数据可以给观察者进行订阅；
 2、能够感知组件（Fragment、Activity、Service）的生命周期；
 3、只有在组件出于激活状态（STARTED、RESUMED）才会通知观察者有数据更新；
 
@@ -996,6 +996,7 @@ CenterCrop、CenterInside、FitCenter类都是继承自BitmapTransformation，�
 3、防内存泄漏：生命周期监控。
 4、图片转换：缩放到ImageView的大小；根据scaleType转换图片大小；自定义bitmap大小；自定义转换bitmap等。
 5、缓存设计：三级缓存。
+6、拓展性设计：支持插件拓展，比如网络加载模块可支持第三方网络框架的接管。
 ```
 
 

@@ -104,6 +104,122 @@ xxx()
 
 ## 语法相关
 
+
+
+### by关键字 - 委托模式
+
+委托模式也叫代理模式,指的是一个对象接收到请求之后将请求转交由另外的对象来处理,它也是继承的一种很好的替代方式,可以实现用组合替代继承。
+
+#### 委托类
+
+```java
+interface Base {
+    fun print()
+}
+
+class BaseImpl(val x: Int) : Base {
+    override fun print() { print(x) }
+}
+
+class Derived(b: Base) : Base by b
+
+fun main() {
+    val b = BaseImpl(10)
+    Derived(b).print()
+}
+```
+
+
+
+
+
+### inline & noinline & crossinline
+
+#### inline注意事项1：别乱用，不然会存在增加代码体积的风险
+
+```java
+什么时候用inline？
+高阶函数有它们天然的性能缺陷（高阶函数会创建为函数对象），通过 inline 让函数用内联的方式进行编译，来减少参数对象的创建，从而避免出现性能问题。
+
+例如：
+private fun a(b_fun: () -> Unit){
+	println("aaa")
+	b_fun()
+}
+
+//如果a函数在循环里边调用，那么循环里就会不断创建 b_fun 这个函数对象，影响性能
+for (i in 1..100){
+	a{ println("bbb") }
+}
+
+//给a函数加上 inline 后，编译优化会变成下面的代码（避免了频繁创建对象）
+for (i in 1..100){
+	println("aaa")
+  println("bbb")  
+}
+```
+
+
+
+#### inline注意事项2：inline会收窄kotlin的功能（使用 noinline 解决）
+
+```java
+inline注意事项2：inline可能会收窄kotlin的功能
+例如：
+//将高阶函数对象作为返回值
+private fun a(b_fun: () -> Unit) : () -> Unit{
+	println("aaa")
+	return b_fun
+}
+
+//调用
+a{ println("bbb") }
+  
+//如果给 a函数加上 inline，Android Studio就会报错，告诉我们无法编译
+//编译后优化后，a{ println("bbb") } 成了下面的代码，肯定是无法编译
+println("aaa")
+return b_fun //b_fun是什么玩意，从哪里来
+
+  
+解决方法：使用 noinline，它的作用是局部关闭内联
+  
+private inline fun a(noinline b_fun: () -> Unit) : () -> Unit{
+	println("aaa")
+	return b_fun
+}
+
+//编译后，优化成了
+println("aaa")
+return b_fun = ({ println("bbb") })
+
+  
+那什么时候用 noinline？用内联的时候，Android Studio报错了就使用noinline。
+```
+
+
+
+#### crossinline 局部加强内联
+
+```java
+内联函数里的函数类型的参数，不允许这种间接调用
+例如：
+private inline fun a(b_fun: () -> String): String{
+    var s = ""
+    val jj = { x: Int ->
+        b_fun() //错误提示：Can't inline 'b_fun' here: it may contain non-local returns. Add 'crossinline' modifier to parameter declaration 'b_fun'
+    }
+    return s
+}
+
+//给 b_fun 函数加上 crossinline 就可以了
+
+但是加上 crossinline 之后，b_fun的lambda里边就不能使用 return
+```
+
+
+
+
+
 ###  lateinit & lazy 区别
 
 ```java
@@ -182,7 +298,7 @@ private class SynchronizedLazyImpl<out T>(initializer: () -> T, lock: Any? = nul
      private fun writeReplace(): Any = InitializedLazyImpl(value)
  }
 lazy：懒加载，在第一次使用的时候才进行赋值。而且修饰的只是能是 val 常量
-原理：将目标属性，包装成为一个Lazy对象，在第一次使用该属性的时候，才执行 Lazy#getValue方法进行属性赋值。而且根据不用lazy mode会有不同的赋值方式，比如默认的线程安全mode，通过synchronized + volatile来保证赋值的可靠性。
+原理：将目标属性，包装成为一个Lazy对象，在第一次使用该属性的时候，才执行 Lazy#getValue方法进行属性赋值。而且根据不同的lazy mode会有不同的赋值方式，比如默认的线程安全mode，通过synchronized + volatile来保证赋值的可靠性。
 ```
 
 
@@ -317,6 +433,10 @@ public final class HigherFunctionKt {
 
 inline原理：Kotlin编译器会将内联函数中的代码在编译的时候自动替换到调用它的地方，这样也就不存在运行时的开销了。
 ```
+
+
+
+#### 
 
 
 
@@ -561,10 +681,6 @@ init代码块优先于次级构造函数中的代码块执行。
 ```
 
 
-
-3. 
-
-   
 
 ## 其他
 
