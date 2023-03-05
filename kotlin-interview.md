@@ -106,30 +106,109 @@ xxx()
 
 
 
-### by关键字 - 委托模式
+### by关键字 - 简化实现代理 (委托) 模式
 
-委托模式也叫代理模式,指的是一个对象接收到请求之后将请求转交由另外的对象来处理,它也是继承的一种很好的替代方式,可以实现用组合替代继承。
-
-#### 委托类
+#### by在类上的时候 - 帮我们实现了类的代理
 
 ```java
-interface Base {
-    fun print()
+//kotlin：
+interface Base { fun show() }
+
+class BaseImpl() : Base {
+    override fun show() { print("show") }
 }
 
-class BaseImpl(val x: Int) : Base {
-    override fun print() { print(x) }
+// 定义代理类实现 Base 接口, 构造函数参数是一个 Base 对象
+// by 后跟 Base 对象, 不需要再实现 print()
+class BaseProxy(b: Base) : Base by b{
+   fun showOther() { print("showOther") }
 }
-
-class Derived(b: Base) : Base by b
 
 fun main() {
-    val b = BaseImpl(10)
-    Derived(b).print()
+    val b = BaseImpl()
+    val bp = BaseProxy(b)
+    bp.show()
+    bp.showOther()
 }
+
+//java实现：
+public interface Base { void show(); }
+
+public class BaseImpl implements Base {  
+   public void show() {
+      System.out.print("show");
+   }
+}
+
+public final class BaseProxy implements Base {  
+   private final Base $$delegate_0;
+
+   public BaseProxy(@NotNull Base base) {
+      Intrinsics.checkParameterIsNotNull(base, "base");
+      super();
+      this.$$delegate_0 = base;
+   }
+
+   public void show() {
+      this.$$delegate_0.show();
+   }
+  
+   public void showOther() {
+      System.out.print("showOther");
+   }
+}
+
+//总结：和一般的代理模式是一样的。by关键为我们字节省了不少代码
 ```
 
 
+
+#### by在属性上的使用
+
+##### by lazy - 属性懒初始化
+
+##### 观察数据的变化 - 帮我们实现了观察者逻辑
+
+```java
+var name: String 
+  by Delegates.observable("hello", { kProperty: KProperty<*>, oldName: String, newName: String ->
+	print("${kProperty.name}---${oldName}--${newName}")
+})
+  
+fun main() {
+    name = "a"
+    name = "b"
+}
+
+//打印
+name---hello--a
+name---a--b
+  
+//java实现：
+//帮我们实现了一个观察者模式的逻辑
+```
+
+
+
+##### 非空强校验 - by Delegates.notNull()
+
+```java
+class User {  
+    var name: String by Delegates.notNull()
+
+    fun init(name: String) {
+        this.name = name
+    }
+}
+
+fun main(args: Array<String>) {  
+    val user = User()
+    print(user.name) //name没有赋值，直接抛异常IllegalStateException
+}
+
+//java实现：
+//帮我们给name包装成一个类，类里边有setValue、getValue方法，给name赋值就是调用setValue方法，使用name就是调用getValue方法，getValue方法里边会判断name是否赋值了，如何没初始化抛异常。
+```
 
 
 
