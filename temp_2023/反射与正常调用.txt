@@ -1,0 +1,46 @@
+正常调用：
+A a = new A();
+a.test();
+
+
+反射调用：
+//Class clazz = Class.forName("A");
+
+Class clazz = A.class;
+Constructor constructor = clazz.getConstructor();
+Object a = constructor.newInstance(); //A a = new A();
+
+Method method = clazz.getMethod("test");
+method.invoke(a); //a.test();
+
+
+正常调用：
+① 创建A对象
+a对象创建后，拥有test()这个方法的索引
+② 执行方法
+通过方法索引，直接就能在虚拟机中找到该索引对应的方法结构体（ArtMethod）
+方法结构体中包含了entry_point指针，这个指针指向的就是方法体里边的代码（汇编指令）
+执行该方法体的代码，就完成对test()方法的调用。
+
+
+反射调用：
+① 查找构造方法（遍历类结构体中的方法索引数组，查找方法）
+根据 getConstructor 传参，生成方法签名。
+在虚拟机中找到A类的类结构体。
+然后通过方法签名在类结构体中查找对应的构造方法结构体。
+
+② 创建A对象
+执行构造方法，进行对象创建。
+
+③ 查找test方法（遍历类结构体中的方法索引数组，查找方法）
+根据 getMethod 传参，生成方法签名。
+在虚拟机中找到A类的类结构体。
+然后通过方法签名在类结构体中查找对应的方法结构体。
+
+④ 执行方法
+跟正常调用一样了
+
+
+看出来区别了吗？
+正常调用：因为知道是A对象，直接有方法索引
+反射调用：需要在虚拟机查找方法索引

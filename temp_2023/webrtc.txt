@@ -1,0 +1,66 @@
+聊天室：信令分发（mars库的STN模块就是实现了信令分发）
+
+聊天室交互流程：
+sever：表示信令服务器
+
+1、客户端与服务端交互
+clientA：msg(join) -> sever
+sever：msg(joined) -> clientA
+
+2、客户端与多个客户端交互
+客户端B进房通知
+clientB：msg(join) -> sever
+sever：msg(joined) -> clientB
+sever：msg(clientB joined) -> clientA
+sever：msg(clientB joined) -> clientC
+sever：msg(clientB joined) -> clientD
+...
+
+客户端与单个客户端交互
+clientB：msg("aaa" to clientA) -> sever
+sever：msg("aaa" from clientB) -> clientA
+
+
+
+
+音视频推拉流：webrtc
+
+第一步：媒体协商（sdp交换，通信双方确认信息）
+SDP协议：会话描述协议，用于告诉通信双方相互的信息（比如是音频交流还是音视频交流，编码是h264还是vp8）
+SDP描述包包含的信息：会话元、网络描述、流描述、安全描述、服务质量
+
+步骤：
+1、clientA 获取相机数据，创建媒体流，添加媒体流给rtc
+2、clientA 创建offer sdp描述包，先将sdp描述设置到本地
+3、然后clientA发送offer sdp描述包给server
+4、server转发给clientB
+
+5、clientB收到clientA的offer sdp描述包后，将sdp描述包设置到rtc远端。
+6、clientB 获取相机数据，创建媒体流，添加媒体流给rtc
+7、clientB 创建answer sdp描述包，先将sdp描述设置到本地
+8、然后clientB发送answer sdp描述包给server
+9、server转发给clientA
+
+10、clientA收到clientB的answer sdp描述包后，将sdp描述包设置到rtc远端。
+
+
+clientA跟clientB是怎么进行数据交换的？
+需要建立在信令服务器的基础上，当前A在聊天室中，当B进入聊天室。
+信令sever会发送B进入聊天室的消息给A，A如何想与B建立通讯，就会发起媒体协商。
+
+
+
+第二步：建立连通（ice交换，通信双方建立连接）
+ICE协议：确定可用于双端通信的传输地址
+
+经过第一步媒体协商之后，rtc远端都拿到了clientA、clientB的sdp信息（client设置远端sdp操作，rtc远端就能到了）。
+rtc远端就会进行分析以及汇总，然后在网络上寻找多条能够让clientA、clientB通讯的链路，把这些链路打包（ice candidate包）发给客户端。
+会发送给offer的发送者，也就是这里的clientA（以接口回调的方式返回ice candidate包）。
+
+1、rtc远端会给clientA发送ice candidate包（会回调PeerConnection.Observer#onIceCandidate）
+2、clientA通过信令将ice candidate包发送给server，server转发给clientB
+3、clientB收到ice candidate包后，进行添加ice candidate操作（addIceCandidate）
+4、双方都知道可用链路了，就能够连通了
+
+第三步：传输
+

@@ -1519,10 +1519,6 @@ installDecor执行流程
 
 #### RecycleView
 
-##### RecycleView与ListView的区别。+2
-
-##### 说说对RecycleView的了解。
-
 #####  说说RecyclerView的回收复⽤机制
 
 ```java

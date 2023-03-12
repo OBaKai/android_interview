@@ -788,11 +788,3 @@ init代码块优先于次级构造函数中的代码块执行。
 kotlin调用java的时候，如果java返回值可能为null 那就必须加上@nullable@nullable否则kotlin无法识别，也就不会强制你做非空处理，一旦java返回了null 那么必定会出现null指针异常，加上@nullable注解@nullable之后kotlin就能识别到java方法可能会返回null，编译器就能会知道，并且强制你做非null处理，这也就是kotlin的空安全。
 ```
 
-
-
-
-
-1. kotlin有什么优缺点？+2
-2. kotlin的lambda与java的lambda有什么区别。
-3. data class 与 Gson发生的解析异常。
-

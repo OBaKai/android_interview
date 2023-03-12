@@ -1,0 +1,270 @@
+使用：
+SVGAParser.Companion.shareParser().decodeFromURL(new URL(url), new SVGAParser.ParseCompletion() {
+	@Override
+	public void onComplete(@NotNull SVGAVideoEntity svgaVideoEntity) {
+		SVGADynamicEntity dynamicEntity = new SVGADynamicEntity();
+    	dynamicEntity.setDynamicImage(avatar, "room_avatar");
+    	dynamicEntity.setDynamicText("llk", new TextPaint(), "room_text");
+		svgaImageView.setImageDrawable(new SVGADrawable(svgaVideoEntity, dynamicEntity));
+		svgaImageView.startAnimation();
+	}
+
+	@Override
+    public void onError() { }
+}, null);
+
+******************************************************************
+
+1、svga优化点：列表场景的svga复用
+如果在列表场景，item里边的svga都是相同的，可以使用svga复用，来降低内存损耗以及防止内存抖动。
+
+常见的使用：
+在 Adapter#onBindViewHolder 里边进行svga的加载，加载完成后丢给SVGAImageView执行播放
+
+造成问题1：内存抖动
+svga的加载过程，涉及到了大量的数据解析以及大量临时的实体对象的创建，最后会将数据填充到SVGAVideoEntity实体对象，那些临时的实体对象就会被清除。
+由于Adapter#onBindViewHolder在滑动的过程中会被大量的调用，就会导致内存抖动的发生。
+
+造成问题2：内存损耗
+① 由于SVGAVideoEntity实体对象里边缓存了所有svg图像bitmap、帧数据等信息，SVGAVideoEntity实体的内存占用是蛮大的。假设调用了 Adapter#onBindViewHolder 10次，就会出现10个SVGAVideoEntity实体的内存占用。
+
+② 并且如果你没有给 SVGAImageView配置 clearsAfterDetached=true，那么item被recyclerview回收后（会走onViewDetachedFromWindow，item里边的view会走onDetachedFromWindow） ，SVGAImageView#onDetachedFromWindow 就不会走释放SVGAVideoEntity对象内的缓存数据的逻辑，只会走停止动画播放。假设列表滑动到底部，列表有50个item，那么就会有50个SVGAVideoEntity对象的内存占用。
+
+优化方案：所有item共用一个svga实体对象
+只加载一次svga，拿到SVGAVideoEntity对象后，提供给所有item的SVGAImageView使用
+（注意：SVGAImageView千万别配置 clearsAfterDetached=true，因为这样在onDetachedFromWindow后会释放SVGAVideoEntity对象内的缓存数据，就无法复用了）
+
+******************************************************************
+
+2、svga优化点（未落地！！！）：提前释放无用的svg图像及音频
+svga播放中每一帧都会有多个svg图像参与，可能在播放还没结束有些svg图像就已经不再参与了。
+比如：多个不同样式的火箭升空的svga，假设有abc三个火箭的svg图像，a火箭升空后就不继续参与后续的动画了。我们是不是可以提前释放a火箭这个bitmap呢？
+
+目前方案：
+svga库只有在 SVGAImageView#onDetachedFromWindow（开发者配置了detach后清除svga实体对象） 以及 开发者主动调用 clear 方法的情况才会对SVGAVideoEntity实体对象的bitmap缓存（缓存所有svg图像）进行统一清空
+并没有单独清空某个bitmap缓存的操作
+
+方案实现：
+在解析svga文件阶段，计算好每个svg图像的真实死亡帧（注意，有可能出现一个svg图像多次参的情况）
+在播放svga动效阶段，先校验播放次数，如果是无限循环播放则不触发该逻辑，多次循环的最后一次播放 以及 单次循环 触发该逻辑
+    通过比对当前帧与svg图像真实死亡帧，就可以判断该svg图像是否可以提前释放了
+
+方案缺陷：
+由于是部分svg图像的提前释放，该SVGAVideoEntity对象是不能被复用了。对需要复用svga实体的场景是无法使用的（场景：recyclerview、viewpager场景中的复用）
+
+最佳应用场景：
+直播间内的大礼物播放的场景，大礼物只会播放一次，并且有些大礼物持续时间较长，以及大礼物涉及到大量的svga图像成员，以及这些成员有些占用的内存比较大。
+同时由于直播间是个内存使用大户，该方案对降低直播间内存有一定的帮助（大概应该或许吧！！！）
+
+备注：
+如果是带声音的svga，音频也可以用这方案提前进行释放的。
+
+如何计算死亡帧：
+假设svga共10帧，该svga内有3个svg图像
+svg图像1参与了1-10帧，无死亡帧
+svg图像2参与了1-5帧，可以认为第6帧是死亡帧
+svg图像3参与了1-3帧，后面又参与了5-8帧，可以认为第9帧是死亡帧
+
+在svga解析阶段，会对所有svg图像的所有帧进行解析，我们可以在这个阶段通过上述方法，计算出死亡帧。
+
+******************************************************************
+
+
+
+============================================================
+
+svga播放流程分析总结：（核心就是 SVGACanvasDrawer#drawFrame）
+1 播放逻辑就是通过动画估计值器计算出当前帧，然后不停地执行Drawable#draw
+2 Drawable#draw 绘制逻辑就是提取参与当前帧的svg图像，再提取这些svg图像在当前帧的帧信息
+3 最后在canvas上进行绘制，先绘制svg图像，然后再绘制svg图像的形状，最后绘制动态贴图、文字等
+
+
+svga播放流程分析：
+1 SVGAImageView#setImageDrawable
+就是这只个SVGADrawable对象，设置了但是不会立马执行播放。
+
+ps：如果某View设置了Drawable的话，Drawable#draw会在View#onDraw执行的时候被调用
+
+    //SVGADrawable#draw
+    override fun draw(canvas: Canvas?) {
+        if (cleared) { //cleared标志位默认是true，随意不会立即执行
+            return
+        }
+        ...
+    }
+
+2 SVGAImageView#startAnimation：播放svga
+startAnimation -> play(range: SVGARange?, reverse: Boolean)
+
+    private fun play(range: SVGARange?, reverse: Boolean) {
+        val drawable = getSVGADrawable() ?: return
+        setupDrawable() //设置drawable.cleared = false，允许 SVGADrawable#draw 执行起来
+        //下面就是计算动画的执行时长、是否重复播放等
+        mStartFrame = Math.max(0, range?.location ?: 0)
+        val videoItem = drawable.videoItem
+        mEndFrame = Math.min(videoItem.frames - 1, ((range?.location ?: 0) + (range?.length ?: Int.MAX_VALUE) - 1))
+        val animator = ValueAnimator.ofInt(mStartFrame, mEndFrame)
+        animator.interpolator = LinearInterpolator()
+        animator.duration = ((mEndFrame - mStartFrame + 1) * (1000 / videoItem.FPS) / generateScale()).toLong()
+        animator.repeatCount = if (loops <= 0) 99999 else loops - 1
+        //在动画更新监听 onAnimationUpdate 计算 SVGADrawable#currentFrame
+        animator.addUpdateListener(mAnimatorUpdateListener)
+        animator.addListener(mAnimatorListener)
+        //播放动画，也就是让View#onDraw不断的刷新起来
+        if (reverse) {
+            animator.reverse()
+        } else {
+            animator.start()
+        }
+        mAnimator = animator
+    }
+
+
+3 创建 SVGADrawable 对象
+//逻辑很简单，就是创建了SVGACanvasDrawer对象，然后在 Drawable#draw 里边执行 SVGACanvasDrawer#drawFrame 方法
+class SVGADrawable(val videoItem: SVGAVideoEntity, val dynamicItem: SVGADynamicEntity): Drawable() {
+
+    constructor(videoItem: SVGAVideoEntity): this(videoItem, SVGADynamicEntity())
+    
+    var currentFrame = 0
+    ...
+    var scaleType: ImageView.ScaleType = ImageView.ScaleType.MATRIX
+
+    private val drawer = SVGACanvasDrawer(videoItem, dynamicItem)
+
+    override fun draw(canvas: Canvas?) {
+        ...
+        canvas?.let {
+            drawer.drawFrame(it, currentFrame, scaleType)
+        }
+    }
+    ...
+}
+
+4 细看 SVGACanvasDrawer 对象（继承自SGVADrawer）
+override fun drawFrame(canvas: Canvas, frameIndex: Int, scaleType: ImageView.ScaleType) {
+    //播放或停止音频（遍历音频信息列表，音频信息中记录有开始帧、停止帧，拿它们与当前帧比对，就知道要播放还是停止了）
+    playAudio(frameIndex)
+    ...
+    //提取参与当前帧播放的svg图像列表（提取的信息有imageKey、matteKey以及该svg图像的当前动画帧信息）
+    val sprites = requestFrameSprites(frameIndex) 
+    ...
+    sprites.forEachIndexed { index, svgaDrawerSprite ->
+            svgaDrawerSprite.imageKey?.let {
+                ...
+                drawSprite(svgaDrawerSprite, canvas, frameIndex) //绘制svg图像
+                ...
+                if (it.endsWith(".matte")) { //不知道.matte后缀的key是啥
+                    matteSprites.put(it, svgaDrawerSprite)
+                    return@forEachIndexed
+                }
+            }
+            /// Is matte begin
+            if (isMatteBegin(index, sprites)) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    saveID = canvas.saveLayer(0f, 0f, canvas.width.toFloat(), canvas.height.toFloat(), null)
+                } else {
+                    canvas.save()
+                }
+            }
+            drawSprite(svgaDrawerSprite, canvas, frameIndex) /// Normal matte
+
+            /// Is matte end
+            if (isMatteEnd(index, sprites)) {
+                matteSprites.get(svgaDrawerSprite.matteKey)?.let {
+                    drawSprite(it, this.sharedValues.shareMatteCanvas(canvas.width, canvas.height), frameIndex)
+                    canvas.drawBitmap(this.sharedValues.sharedMatteBitmap(), 0f, 0f, this.sharedValues.shareMattePaint())
+                    if (saveID != -1) {
+                        canvas.restoreToCount(saveID)
+                    } else {
+                        canvas.restore()
+                    }
+                    // Continue
+                    return@forEachIndexed
+                }
+            }
+        }
+}
+
+5 drawSprite 方法（这里就不细看了，东西太多了）
+private fun drawSprite(sprite: SVGADrawerSprite, canvas: Canvas, frameIndex: Int) {
+    drawImage(sprite, canvas) //绘制svg图像
+    drawShape(sprite, canvas) //根据该帧信息，绘制svg图像的一些形状变换
+    drawDynamic(sprite, canvas, frameIndex) //绘制动态贴图、文字等（就是处理开发者配置SVGADynamicEntity的时候传入的贴图、文字等）
+}
+
+
+============================================================
+
+
+svga加载流程总结：就是将svga文件的信息加载成一个实体对象（SVGAVideoEntity），将这个实体对象回调给业务层
+1、提取svga相关信息，比如宽高、fps、帧数
+2、提取svg图像数据 加载成 bitmap
+3、提取所有svg图像的帧信息 转换为 一个个SVGAVideoSpriteEntity对象（里边保存着该图像的所有动画帧信息）
+   一个svga由多个svg图像组成（所以SVGAVideoSpriteEntity会用容器存储），一个svg图像会参与持续的多个动画帧的播放（所以SVGAVideoSpriteEntity对象内会有一个frams容器存储SVGAVideoSpriteFrameEntity）
+4、如果svga带有音频的话，提取音频数据缓存到文件后，并使用SoundPool加载音频文件。还有提取音频播放信息 转换为 一个个SVGAAudioEntity对象
+   一个svga可能会有多段音频（所以SVGAAudioEntity会用容器存储）
+
+
+svga加载流程分析（以加载网络文件为例）：
+
+1 SVGAParser#decodeFromURL(url: URL, callback: ParseCompletion?)
+1.1 根据url生成cachekey判断是否有本地缓存
+1.2 有则直接走本地加载（decodeFromCacheKey），没有则先走网络下载再走文件加载（decodeFromInputStream）
+
+
+2 SVGAParser#decodeFromInputStream
+2.1 如果文件是zip先进行unzip，然后再 SVGAVideoEntity(MovieEntity.ADAPTER.decode(it), cacheDir, ...)
+2.2 反之直接 SVGAVideoEntity(MovieEntity.ADAPTER.decode(it), cacheDir, ...)
+2.3 创建完SVGAVideoEntity对象后，执行 SVGAVideoEntity#prepare
+2.4 最后回调 ParseCompletion#onComplete ，返回 SVGAVideoEntity 对象，完成加载
+
+
+3 细看 SVGAVideoEntity 对象的创建 以及 SVGAVideoEntity#prepare 方法
+
+3.1 SVGAVideoEntity(MovieEntity.ADAPTER.decode(it), cacheDir, ...)
+MovieEntity.ADAPTER.decode(it)：这里是将文件的字节流解析成一个MovieEntity对象（svga文件格式是Protobuf，所以这里是使用Protobuf解析库进行解析）
+
+3.2 SVGAVideoEntity构造函数
+constructor(entity: MovieEntity, cacheDir: File, frameWidth: Int, frameHeight: Int) {
+        ...
+        entity.params?.let(this::setupByMovie) //获取一些svga信息，比如svga的宽高、fps、帧数
+        ...
+        parserImages(entity) //将实体里边的 svg图像字节流 转换成 bitmap
+        ...
+        resetSprites(entity) //将实体里边的 所有svg图像的动画帧信息 转换成一个个SVGAVideoSpriteEntity对象，并缓存到容器中
+    }
+
+3.2.1 细看 SVGAVideoSpriteEntity 对象的创建（一个SVGAVideoSpriteEntity保存着一个svg图像的所有动画帧信息）
+    constructor(obj: SpriteEntity) {
+        this.imageKey = obj.imageKey //svg图像key
+        this.matteKey = obj.matteKey //蒙层key
+        ...
+        frames = obj.frames?.map { //该svg图像的所有帧信息 转换成一个个 SVGAVideoSpriteFrameEntity 对象
+            //将每一帧中该svg图像的位置、大小、形状、颜色等信息缓存到 SVGAVideoSpriteFrameEntity 里边（里边东西太多了，就不看了）
+            val frameItem = SVGAVideoSpriteFrameEntity(it)
+            ...
+            return@map frameItem
+        } ?: listOf()
+    }
+
+
+3.3 SVGAVideoEntity#prepare 方法执行
+//如果svga是有带声音的话，就往下执行加载声音逻辑，不带声音就返回了。
+if (entity.audios == null || entity.audios.isEmpty()) {
+	run(completionBlock)
+	return
+}
+setupSoundPool(entity, completionBlock) //配置SoundPool
+val audiosFileMap = generateAudioFileMap(entity) //将实体里边的 音频字节流 保持到本地的缓存文件中
+if (audiosFileMap.size == 0) { //如果文件列表为0，也是证明没带声音，直接返回了。
+	run(completionBlock)
+	return
+}
+//将实体里边 所有音频信息 转换为 一个个SVGAAudioEntity对象，并缓存到容器中（ps：一个svga有肯能存在多个音频）
+//使用SoundPool加载音频文件，并且将soundid缓存到SVGAAudioEntity对象里边，方便后续播放
+//音频信息包括：音频key、开始帧、结束帧、soundid等
+this.audioList = entity.audios.map { audio ->
+	return@map createSvgaAudioEntity(audio, audiosFileMap)
+}
+

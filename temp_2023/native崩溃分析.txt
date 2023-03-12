@@ -1,0 +1,61 @@
+文章：https://cloud.tencent.com/developer/article/1780450
+
+1、崩溃代码：
+Java_com_llk_xxx_ui_Native_nativeLogin(JNIEnv *env,jclass clazz){
+	...
+	std::string result = nullptr;
+    if (result.length() == 100){
+    	...
+    }
+	...
+}
+
+
+2、崩溃堆栈：
+...
+A/DEBUG: ABI: 'arm64'
+A/DEBUG: Timestamp: 2023-01-23 13:35:28.778689441+0800
+A/DEBUG: Process uptime: 0s
+A/DEBUG: Cmdline: com.llk.xxx
+A/DEBUG: pid: 31013, tid: 31337, name: Thread-5  >>> com.llk.xxx <<<
+A/DEBUG: uid: 10689
+A/DEBUG: signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0x0
+A/DEBUG: Cause: null pointer dereference
+...
+A/DEBUG: backtrace:
+A/DEBUG:       #00 pc 000000000004afd0  /apex/com.android.runtime/lib64/bionic/libc.so (__strlen_aarch64+16) (BuildId: b94752b6809cd7518c3c28ff9d195306)
+A/DEBUG:       #01 pc 000000000002f59c  /data/app/~~JyCT4PkOfGxKX6VC6VDOmg==/com.llk.xxx-dJrcq63ZBb1owHLA6OJmXQ==/lib/arm64/libcore.so (Java_com_llk_xxx_ui_Native_nativeLogin+756) (BuildId: 18d96ca413cb8345ffc64500e7ca99eaf8837a3d)
+A/DEBUG:       #02 pc 00000000002d7644  /apex/com.android.art/lib64/libart.so (art_quick_generic_jni_trampoline+148) (BuildId: 2b417e2566f5eb686666666b6ee952ea)
+...
+
+fault addr 0x0告诉我们所有空指针引起的 crash
+我们最关心的就是 #01 -> Java_com_llk_xxx_ui_Native_nativeLogin出问题了
+后面的+756并不是指原始代码中的第 756 行出现问题，实际上编译工具默认在编译过程中会进行优化和对齐。
+
+
+
+3、addr2line命令查看：aarch64-linux-android-addr2line -e <so 文件路径> -f <pc值> 
+① 查看stripped的so
+ndk/21.1.6352462/toolchains/aarch64-linux-android-4.9/prebuilt/darwin-x86_64/bin/aarch64-linux-android-addr2line -e xxx/app/build/intermediates/stripped_native_libs/release/out/lib/arm64-v8a/libcore.so -f 000000000002f59c
+
+Java_com_llk_xxx_ui_Native_nativeLogin
+??:?
+
+
+跟backtrace里边显示有什么区别？
+??:?又是什么鬼，啊啊啊啊！！！！（原因：代码在编译配置中一般不生成符号表symbolic信息的，不过AS会默认我们编译出带符号表的so文件，我们可以通过它来查看）
+
+
+
+② 查看no strip的so（带符号表）
+ndk/21.1.6352462/toolchains/aarch64-linux-android-4.9/prebuilt/darwin-x86_64/bin/aarch64-linux-android-addr2line -e xxx/app/build/intermediates/cmake/release/obj/arm64-v8a/libcore.so -f 000000000002f59c
+
+_ZNSt6__ndk111char_traitsIcE6lengthEPKc
+/ndk/21.1.6352462/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/c++/v1/__string:217
+
+
+_ZNSt6__ndk111char_traitsIcE6lengthEPKc 这又是什么鬼？？？为什么是一串乱码？（编译器在编译时对函数名按照一定的规则进行了优化，优化规则是一定的，可以还原）
+在线还原的网站：http://demangler.com/
+还原后：std::__ndk1::char_traits<char>::length(char const*)
+
+这样我们可以猜测在 Java_com_llk_xxx_ui_Native_nativeLogin 函数里边，是不是有个为null的字符串使用了length()函数导致的空指针。

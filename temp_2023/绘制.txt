@@ -1,0 +1,123 @@
+
+
+
+
+
+
+
+
+
+SurfaceView学习：SurfaceView有自己的Surface，可以在一个独立线程里边进行绘制。
+
+每个Window对应一个Surface。SurfaceView在创建的时候会创建一个Window，并且将自己与Window绑定到一起。
+
+1、SurfaceView的设计遵循View体系，因为它继承了View，所以支持xml声明、动态添加；
+2、Surface是纵深排序(Z-ordered)的，所以SurfaceView默认在Activity底下（需要 setZOrderOnTop(true) 才能在上）
+3、SurfaceView无法进行平移、缩放等动画，以及View.setAlpha()（Android7.0 SurfaceView的窗口位置与其他View渲染同步更新。这意味着在屏幕上平移和缩放SurfaceView不会导致渲染失真）
+4、SurfaceView黑屏问题：
+	SurfaceView#draw中当满足!isAboveParent()的条件——即SurfaceView的子图层类型位于宿主视图的下方时，SurfaceView默认会将绘图表面的颜色指定为黑色。
+	解决：拿到Canvas直接绘制个颜色就可以了（注意SurfaceView类型不能为SURFACE_TYPE_PUSH_BUFFERS，因为该类型不能自由操控Canvas）
+
+TextureView（需要开启硬件加速）：
+	它是View 和 SurfaceTexture的结合。它并不是独立Window，而是遵循View体系。
+	TextureView 重载了 draw() 方法，其中主要 SurfaceTexture 中收到的图像数据作为纹理更新到对应的 HardwareLayer 中。
+
+	SurfaceTexture与SurfaceView不同的是，它对图像流的处理并不直接显示，而是转为GL外部纹理，因此用于图像流数据的二次处理。
+	与SurfaceView直接输出相比，这样会有若干帧的延迟。同时，由于它本身管理BufferQueue，因此内存消耗也会稍微大一些。
+
+优点：
+能跟View一样，能平移、缩放等动画，以及View.setAlpha()；
+TextureView.setSurfaceTextureListener() 在子线程中更新UI；
+缺点：
+开启了硬件加速的窗口中使用；
+TextureView 消费的内存要比 SurfaceView 要多，并伴随着 1-3 帧的延迟。
+
+
+
+Surface学习：
+每个Window对应一个Surface。
+
+所有View的展示都是需要画一个Canvas才能展示的。Surface会将这个Canvas转化为一个Buffer缓冲区，传递给系统去展示。所以Surface相当于是一个Buffer缓冲区。
+
+为了保证Surface里边这个Buffer缓冲区的线程安全，所以规定View必须要在UI线程中才能绘制。
+产生的问题：在UI渲染的效率要求非常高的场景，比如渲染音视频数据、渲染相机数据、渲染复杂图像数据等。
+问题的解决：拥有独立的Surface，可以脱离Activity宿主的限制，在一个独立的线程中进行绘制（由于该不会占用UI线程资源，一方面可以实现复杂而高效的 UI渲染，另一方面可以及时响应用户其它输入事件）。
+
+Surface是纵深排序(Z-ordered)的，这表明它总在自己所在窗口的后面。
+例如：Activity上有个SurfaceView，默认情况下SurfaceView在Activity下面，Activity所有的View都会遮挡在SurfaceView之上，不管这个SurfaceView在XML的哪个位置。
+
+
+
+
+1、Activity的Surface是怎么传递给系统的？
+
+Surface本质是是个GraphicBufferProducer，而不是buffer。
+Surface的传递本质上是GraphicBufferProducer的传递。GraphicBufferProducer是个Binder对象，传递Binder对象是非常快的（传递buffer的话就非常累赘了）。
+
+ViewRootImpl mSurface属性：
+	public final Surface mSurface = new Surface(); //Surface对象是一个空壳对象
+ViewRootImpl#setView 有两个关键逻辑
+	1、requestLayout()：请求首次绘制
+		① requestLayout -> scheduleTraversals -> doTraversal（TraversalRunnable#run）-> performTraversals
+		② performTraversals：如果是首次绘制，执行 relayoutWindow 方法
+		③ relayoutWindow：执行 mWindowSession.relayout(...mSurfaceControl...) 然后 mSurface.copyFrom(mSurfaceControl)
+		   从WMS申请到真正的Surface对象后，填入mSurface这个空壳对象里边。
+		④ copyFrom：SurfaceControl里边有个GBP对象（GraphicBufferProducer），然后根据这个GBP，new了一个native Surface对象，并且返回这个native Surface对象的指针地址给mSurface。
+	2、将app端的Binder实体对象 IWindow.Stub 发布给WMS
+
+
+2、Surface是如何绘制的？
+在三大绘制流程的draw流程中，通过Surface将Canves绘制到一个Buffer里边，然后将Buffer传给SurfaceFlinger。
+
+Surface绘制的Buffer怎么来的？
+GraphicBufferProducer通过Binder调用，向SurfaceFlinger申请的BufferQueue申请的。
+
+绘制完Buffer之后如何提交的？
+也是通过GraphicBufferProducer提交的（使用匿名共享内存）
+
+
+
+
+
+
+屏幕绘制：
+1、应用向系统服务申请一块Buffer
+2、系统服务返回一块Buffer给应用
+3、应用绘制后提交Buffer给系统服务
+4、系统服务将Buffer写到屏幕图像缓冲区
+5、屏幕周期性地将图像缓冲区的数据读取出来并且显示
+注意：屏幕图像缓冲区并不是一个缓存，而且两个。一个用来显示，一个用来写入。当系统服务完成写入后，显示缓存才会拷贝写入缓存的数据（避免撕裂帧的出现）。
+
+
+Vsync信号
+安卓系统中有2种VSync信号
+屏幕产生的硬件VSync：通知刷新屏幕的
+SurfaceFlinger将其转成的软件Vsync信号：经由Binder传递给Choreographer，来执行刷新界面
+
+
+
+app界面绘制：
+1、app请求界面绘制（requestLayout），requestLayout就会创建了一个Runnable，丢到Choreographer的队列里边
+2、Choreographer并没有马上执行这个Runnable，而是向SurfaceFlinger请求下一个Vsync信号（requestNextVsync）
+3、SurfaceFlinger就会在下一个Vsync信号来的时候给Choreographer发送一个通知（postSyncEvent）
+4、Choreographer收到通知后，就会去处理队列里边的Runnable。Runnable就会执行界面绘制（performTraversal）
+
+
+Choreographer是如何向SurfaceFlinger请求下一个Vsync信号的？
+
+1、Choreographer创建的时候，会获取SurfaceFlinger的Binder代理对象，然后通过Binder调用向SurfaceFlinger请求Vsync通知的fd。
+SurfaceFlinger会创建两个fd，一个读fd，一个写fd。将读fd返回给app的Choreographer（当Vsync信号来的时候SurfaceFlinger往写fd写东西，读fd就能收到了）。
+
+2、Choreographer将读fd，加入到looper监听里边，一旦收到事件，就会调用回调函数。
+Choreographer构造函数 -> FrameDisplayEventReceiver构造函数 -> nativeInit -> 创建NativeDisplayEventReceiver对象，并调用其initialize函数
+	NativeDisplayEventReceiver#initialize：
+		执行 mMessageQueue->getLooper()->addFd(mReceiver.getFd(), 0, Lopper::EVENT_INPUT, this, null);
+		① mReceiver.getFd()：SurfaceFlinger传给app端的fd，当有Vsync来的时候，就会往fd里边写入
+		② Lopper::EVENT_INPUT：监听的事件类型
+		③ this：回调函数，就是 NativeDisplayEventReceiver#handleEvent（这个函数的返回值为1，就是希望looper继续监听这个fd事件。）
+
+3、并不是每次Vsync信号来SurfaceFlinger都会通知的。需要Choreographer向SurfaceFlinger请求下一个Vsync信号（requestNextVsync），SurfaceFlinger才会通过写fd通知app端。
+
+
+
+
